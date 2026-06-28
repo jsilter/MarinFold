@@ -1,17 +1,18 @@
 # Copyright The MarinFold Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Materialize selected Atlas reps into an afdb-24M-layout parquet (stage 3).
+"""Materialize selected Atlas reps into a contacts-v1-ready parquet (stage 3).
 
-``pipeline.py`` produces ``selected_manifest.csv`` — one row per chosen cluster
-representative (``protein_hash`` + metadata), but **no structures**. This script
-is the final step: it pulls those rows' ``structure_blob`` from ``folds_1B.lance``,
-decodes each to mmCIF text, and writes a parquet whose schema matches the
-``afdb-24M`` datasets the training pipeline already reads — each row carries the
-raw mmCIF in ``cif_content`` and the id in ``entry_id`` (the
-``contacts-v1`` ``generate`` defaults, see
-``marinfold/document_structures/contacts_v1/parse.py``). The published parquet
-then feeds ``contacts-v1 generate`` unchanged.
+All data here comes from the **ESM Atlas** (``folds_1B.lance``); "afdb-24M" never
+enters as a data source. ``pipeline.py`` produces ``selected_manifest.csv`` — one
+row per chosen cluster representative (``protein_hash`` + metadata), but **no
+structures**. This script is the final step: it pulls those rows' ``structure_blob``
+from the Atlas, decodes each to mmCIF text, and writes a parquet in the column
+layout ``contacts-v1 generate`` reads — each row carries the raw mmCIF in
+``cif_content`` and the id in ``entry_id`` (the generator's defaults, see
+``marinfold/document_structures/contacts_v1/parse.py``; the published ``afdb-24M``
+datasets use the same two column names, which is the only sense in which that name
+is relevant). The output then feeds ``contacts-v1 generate`` unchanged.
 
 Like ``scan``, this is one pass over ``folds_1B.lance`` keyed on a membership set,
 so it is **shardable** (``--num-shards`` / ``--shard-id``) across instances and
@@ -38,8 +39,8 @@ import pyarrow.parquet as pq
 
 import atlas_io
 
-# Match the contacts-v1 afdb-24M defaults (parse.DEFAULT_ID_COLUMN / _CIF_COLUMN)
-# so the published parquet feeds ``contacts-v1 generate`` with no column remapping.
+# Match the contacts-v1 generator's column defaults (parse.DEFAULT_ID_COLUMN /
+# _CIF_COLUMN) so the published parquet feeds it with no column remapping.
 ID_COLUMN = "entry_id"
 CIF_COLUMN = "cif_content"
 SOURCE_TAG = "esm-atlas-v1"

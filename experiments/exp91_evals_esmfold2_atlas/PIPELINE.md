@@ -14,7 +14,7 @@ characterization, the funnel design, the distillation survey), read
 | `funnel.py` | sample-tuning of the metadata gates + the pure `apply_funnel()` |
 | `pipeline.py` | on-instance worker: scan → novelty → leakage → cluster → select → `selected_manifest.csv` |
 | `selection.py` | one rep per cluster (ESMFold2 rule: longest, then lowest pLDDT std-dev) |
-| `materialize.py` | manifest → decode each rep's structure → afdb-24M-layout parquet (`entry_id` + `cif_content`) |
+| `materialize.py` | manifest → decode each Atlas rep's structure → parquet in the schema `contacts-v1 generate` reads (`entry_id` + `cif_content`) |
 | `run_aws.py` | boto3 launcher: stages the scripts, runs `pipeline.py` on a throwaway EC2 box, self-terminates |
 | `create_dataset.sh` | end-to-end driver wrapping all of the above |
 
@@ -46,8 +46,8 @@ Edit the `CONFIG` block at the top of `create_dataset.sh` first (see below), the
 ./create_dataset.sh manifest    # download the manifest locally
 ```
 
-Then materialize the chosen reps to structures (on an in-region instance, because
-it decodes `structure_blob`):
+Then materialize the chosen reps to structures (decoding the Atlas `structure_blob`;
+runs on an in-region instance):
 
 ```bash
 python materialize.py --manifest selected_manifest.csv --out-dir dataset/
