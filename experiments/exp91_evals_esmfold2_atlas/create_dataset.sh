@@ -5,6 +5,9 @@
 # End-to-end driver for building the ESM Atlas distillation subset.
 #
 # Stages (pass one as $1; "all" chains prep-ref -> run -> manifest):
+#   local-smoke  run the WHOLE chain locally on a tiny Atlas slice (no AWS): funnel
+#                (scan->novelty->leakage->cluster->select) + materialize to parquet.
+#                Needs mmseqs on PATH; reads the Atlas anonymously. Sanity check only.
 #   prep-ref  download our AFDB training set from HuggingFace, extract sequences
 #             to FASTA, upload to S3 (the novelty reference; run once).
 #   smoke     launch a capped EC2 run (--limit) to validate the whole chain cheaply.
@@ -46,6 +49,11 @@ MAX_AFDB_SEQ_ID="0.40"                    # novelty: drop >=40% id to AFDB
 EVAL_MAX_SEQ_ID="0.40"                    # leakage: drop >=40% id to eval set
 CLUSTER_ID="0.40"                         # linclust identity (size dial)
 REPS_PER_CLUSTER="1"
+
+# --- local-smoke knobs --------------------------------------------------------
+LOCAL_SMOKE_LIMIT="50000"                 # Atlas rows scanned in the local smoke
+LOCAL_WORK="${LOCAL_WORK:-_localsmoke}"   # scratch dir (gitignored); wiped each run
+EVAL_SEQS_CSV="../exp65_evals_low_msa_depth_proteins/data/candidate_sequences.csv"
 # ============================================================================
 
 # Derived locations
@@ -58,6 +66,59 @@ AFDB_FASTA="${AFDB_LOCAL_DIR}/afdb_ref.fasta"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
+
+local_smoke() {  # whole pipeline on a tiny slice, no AWS — does it run + emit valid output?
+  command -v mmseqs >/dev/null || { echo "[local-smoke] mmseqs not on PATH" >&2; exit 1; }
+  local w="$LOCAL_WORK"
+  rm -rf "$w"; mkdir -p "$w"
+  echo "[local-smoke] building eval + tiny AFDB references"
+  EVAL_SEQS_CSV="$EVAL_SEQS_CSV" SMOKE_DIR="$w" uv run python - <<'PY'
+import os, pandas as pd
+w = os.environ["SMOKE_DIR"]
+df = pd.read_csv(os.environ["EVAL_SEQS_CSV"])
+with open(f"{w}/eval_seqs.fasta", "w") as f:
+    for r in df.itertuples():
+        f.write(f">{r.stem}\n{r.sequence}\n")
+# Tiny stand-in AFDB novelty reference (exercises the mmseqs search path). The
+# real run uses prep-ref's full afdb_ref.fasta; for a local sanity check two
+# arbitrary sequences are enough.
+with open(f"{w}/afdb_ref.fasta", "w") as f:
+    f.write(">ref1\nMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKR\n")
+    f.write(">ref2\nMSEQNNTEMTFQIQRIYTKDISFEAPNAPHVFQKDWQPEVKLDLDTASSQLADDVYEVVLRVTVTASLGEETAFLCEVQQGGIFSI\n")
+print(f"[local-smoke] eval seqs: {len(df)}, afdb ref: 2")
+PY
+
+  echo "[local-smoke] funnel (limit ${LOCAL_SMOKE_LIMIT})"
+  uv run python pipeline.py --work-dir "$w/work" --stage all --limit "$LOCAL_SMOKE_LIMIT" \
+    --afdb-ref "$w/afdb_ref.fasta" --eval-ref "$w/eval_seqs.fasta" --compute-plddt-std \
+    --min-plddt "$MIN_PLDDT" --min-ptm "$MIN_PTM" \
+    --max-afdb-seq-id "$MAX_AFDB_SEQ_ID" --eval-max-seq-id "$EVAL_MAX_SEQ_ID" \
+    --cluster-id "$CLUSTER_ID" --reps-per-cluster "$REPS_PER_CLUSTER"
+
+  # Materialize only a small, row-ordered slice of the manifest so the (heavy,
+  # cross-region) structure_blob reads finish quickly; early-exit stops the scan
+  # once those reps are found.
+  echo "[local-smoke] mini manifest (first 30 reps) + materialize"
+  SMOKE_DIR="$w" uv run python - <<'PY'
+import os, pandas as pd
+w = os.environ["SMOKE_DIR"]
+m = pd.read_parquet(f"{w}/work/survivors_meta.parquet").head(30).copy()
+m["cluster_id"] = m["protein_hash"]; m["cluster_size"] = 1
+m.to_csv(f"{w}/mini_manifest.csv", index=False)
+PY
+  uv run python materialize.py --manifest "$w/mini_manifest.csv" \
+    --out-dir "$w/dataset" --limit "$LOCAL_SMOKE_LIMIT"
+
+  SMOKE_DIR="$w" uv run python - <<'PY'
+import os, pandas as pd, gemmi
+w = os.environ["SMOKE_DIR"]
+df = pd.read_parquet(f"{w}/dataset/atlas_distill_0.parquet")
+ok = sum(1 for c in df.cif_content if len(gemmi.read_structure_string(c)[0][0]) > 0)
+assert {"entry_id", "cif_content"} <= set(df.columns), "schema mismatch"
+assert ok == len(df), f"only {ok}/{len(df)} CIFs parse"
+print(f"[local-smoke] OK: {len(df)} structures, schema + all CIFs valid -> {w}/dataset/")
+PY
+}
 
 prep_ref() {
   mkdir -p "$AFDB_LOCAL_DIR"
@@ -128,10 +189,11 @@ manifest() {
 }
 
 case "${1:-}" in
-  prep-ref) prep_ref ;;
-  smoke)    smoke ;;
-  run)      run ;;
-  manifest) manifest ;;
-  all)      prep_ref; run; manifest ;;
-  *) echo "usage: $0 {prep-ref|smoke|run|manifest|all}" >&2; exit 2 ;;
+  local-smoke) local_smoke ;;
+  prep-ref)    prep_ref ;;
+  smoke)       smoke ;;
+  run)         run ;;
+  manifest)    manifest ;;
+  all)         prep_ref; run; manifest ;;
+  *) echo "usage: $0 {local-smoke|prep-ref|smoke|run|manifest|all}" >&2; exit 2 ;;
 esac
