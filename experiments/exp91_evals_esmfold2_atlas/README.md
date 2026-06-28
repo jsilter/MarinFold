@@ -270,6 +270,10 @@ string. Concretely:
 Goal: add a quality-filtered, novel, de-duplicated slice of the Atlas to our
 existing ~10M AFDB training set for the new structure model.
 
+> **Runbook:** the operator guide for actually running this (`create_dataset.sh`,
+> the local smoke test, the AWS production flow, `materialize.py`, and the config
+> knobs) is in [`PIPELINE.md`](PIPELINE.md). The sections below are the rationale.
+
 ### What other models do (predicted-structure distillation survey)
 
 Researched from the papers/supplements (memory: `distillation-recipes-survey`):
