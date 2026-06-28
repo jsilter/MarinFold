@@ -46,7 +46,8 @@ EXP65_SEQS = (HERE.parent / "exp65_evals_low_msa_depth_proteins"
               / "data" / "candidate_sequences.csv")
 # Scripts the instance needs (pipeline imports atlas_io + selection; funnel is
 # carried for parity / post-selection QC).
-SCRIPTS = ["pipeline.py", "atlas_io.py", "selection.py", "funnel.py"]
+SCRIPTS = ["pipeline.py", "atlas_io.py", "selection.py", "funnel.py",
+           "materialize.py"]
 
 # Cloud-init bootstrap. {placeholders} are filled by render_user_data().
 USER_DATA_TMPL = r"""#!/bin/bash
