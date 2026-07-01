@@ -24,3 +24,8 @@ paper.txt
 # Scratch / smoke outputs.
 data/_*
 _localsmoke/
+
+# AWS credentials — NEVER commit. Exported from CloudShell, short-lived.
+aws_keys.env
+*.env
+*_keys*

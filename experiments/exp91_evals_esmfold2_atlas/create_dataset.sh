@@ -8,8 +8,8 @@
 #   local-smoke  run the WHOLE chain locally on a tiny Atlas slice (no AWS): funnel
 #                (scan->novelty->leakage->cluster->select) + materialize to parquet.
 #                Needs mmseqs on PATH; reads the Atlas anonymously. Sanity check only.
-#   prep-ref  download our AFDB training set from HuggingFace, extract sequences
-#             to FASTA, upload to S3 (the novelty reference; run once).
+#   prep-ref  extract the afdb-24M struct-cluster rep sequences from exp41's
+#             MMseqs/Foldseek target DB to FASTA, upload to S3 (novelty ref; once).
 #   smoke     launch a capped EC2 run (--limit) to validate the whole chain cheaply.
 #   run       launch the full funnel on EC2; writes selected_manifest.csv to S3.
 #   manifest  download the finished manifest locally.
@@ -20,22 +20,20 @@
 set -euo pipefail
 
 # ============================ CONFIG (edit these) ============================
-BUCKET="YOURBUCKET"                       # S3 bucket you own, in us-west-2
+BUCKET="marinfold-exp91-usw2"             # S3 bucket you own in us-west-2 (name must start "marinfold")
 REGION="us-west-2"
-IAM_PROFILE="marinfold-exp91"             # instance profile w/ S3 read+write
+IAM_PROFILE="marinfold-exp91-instance-role"   # EC2 instance profile (console names it after the role); smoke probes it
 INSTANCE_TYPE="r7i.16xlarge"              # big-RAM CPU; scale to survivor count
 SMOKE_LIMIT="2000000"                     # rows scanned in the smoke run
 
-# --- AFDB novelty reference (downloaded from the MarinFold HF bucket) ---------
-HF_BUCKET="open-athena/MarinFold"         # the MarinFold HF bucket (namespace/name)
-HF_AFDB_PREFIX="afdb-24m"                 # path within the bucket w/ the seqs (adjust;
-                                          #   `hf buckets list hf://buckets/${HF_BUCKET}`)
-HF_AFDB_INCLUDE="*.parquet"               # narrow to the sequence parquets
-AFDB_ID_COL="id"                          # id column in those parquets (adjust)
-AFDB_SEQ_COL="sequence"                   # sequence column (adjust)
-# Alternative: pull from a dataset repo instead of the bucket (set to 1).
-USE_DATASET_REPO="0"
-HF_AFDB_REPO="timodonnell/afdb-24M"
+# --- AFDB novelty reference (afdb-24M struct-cluster reps, via exp41) ----------
+# The novelty stage drops Atlas proteins already represented in our training set
+# (afdb-24M). The reference is the 1.33M struct-cluster representatives exp41
+# isolated; their amino-acid sequences already live in that experiment's MMseqs/
+# Foldseek target DB (dbtype 0), so prep-ref extracts them with `convert2fasta`.
+# We deliberately do NOT pull `timodonnell/afdb-24M` (1.2 TB, and it has no
+# sequence column — only mmCIF text) just to recover sequences.
+EXP41_REP_DB="../exp41_evals_foldseek_train_similarity/db_full/db/targetDB"
 
 # --- funnel thresholds (mirror funnel.py / pipeline.py defaults) --------------
 # pLDDT is a QUALITY FLOOR, not the size dial. 0.70 = the paper's "high confidence"
@@ -121,35 +119,17 @@ PY
 }
 
 prep_ref() {
+  # Extract the afdb-24M struct-cluster rep sequences (exp41's target DB, dbtype 0)
+  # to FASTA and upload as the novelty reference. Run once; ~1.33M seqs, ~350 MB.
+  command -v mmseqs >/dev/null || { echo "[prep-ref] mmseqs not on PATH" >&2; exit 1; }
+  [ -e "$EXP41_REP_DB" ] || {
+    echo "[prep-ref] rep DB not found: ${EXP41_REP_DB}" >&2
+    echo "[prep-ref] sync exp41's db_full first (see exp41 README)" >&2
+    exit 1; }
   mkdir -p "$AFDB_LOCAL_DIR"
-  if [ "$USE_DATASET_REPO" = "1" ]; then
-    echo "[prep-ref] hf download ${HF_AFDB_REPO} (${HF_AFDB_INCLUDE})"
-    hf download "$HF_AFDB_REPO" --type dataset \
-        --include "$HF_AFDB_INCLUDE" --local-dir "$AFDB_LOCAL_DIR"
-  else
-    echo "[prep-ref] hf buckets sync hf://buckets/${HF_BUCKET}/${HF_AFDB_PREFIX}"
-    hf buckets sync "hf://buckets/${HF_BUCKET}/${HF_AFDB_PREFIX}" "$AFDB_LOCAL_DIR" \
-        --include "$HF_AFDB_INCLUDE"
-  fi
-
-  echo "[prep-ref] extracting sequences -> ${AFDB_FASTA}"
-  AFDB_LOCAL_DIR="$AFDB_LOCAL_DIR" AFDB_FASTA="$AFDB_FASTA" \
-  AFDB_ID_COL="$AFDB_ID_COL" AFDB_SEQ_COL="$AFDB_SEQ_COL" \
-  uv run python - <<'PY'
-import os, glob, pyarrow.parquet as pq
-d, out = os.environ["AFDB_LOCAL_DIR"], os.environ["AFDB_FASTA"]
-idc, sc = os.environ["AFDB_ID_COL"], os.environ["AFDB_SEQ_COL"]
-files = sorted(glob.glob(os.path.join(d, "**", "*.parquet"), recursive=True))
-assert files, f"no parquet files under {d} (check HF_AFDB_INCLUDE)"
-n = 0
-with open(out, "w") as f:
-    for p in files:
-        for batch in pq.ParquetFile(p).iter_batches(columns=[idc, sc], batch_size=50000):
-            col = batch.to_pydict()
-            for i, s in zip(col[idc], col[sc]):
-                f.write(f">{i}\n{s}\n"); n += 1
-print(f"[prep-ref] wrote {n:,} sequences from {len(files)} parquet file(s)")
-PY
+  echo "[prep-ref] mmseqs convert2fasta ${EXP41_REP_DB} -> ${AFDB_FASTA}"
+  mmseqs convert2fasta "$EXP41_REP_DB" "$AFDB_FASTA"
+  echo "[prep-ref] extracted $(grep -c '^>' "$AFDB_FASTA") sequences"
 
   echo "[prep-ref] uploading -> ${AFDB_REF_S3}"
   aws s3 cp "$AFDB_FASTA" "$AFDB_REF_S3" --region "$REGION"

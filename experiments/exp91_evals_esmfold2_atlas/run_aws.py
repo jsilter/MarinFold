@@ -133,12 +133,27 @@ def build_scripts_tarball() -> bytes:
 
 
 def resolve_ami(ec2, region: str) -> str:
-    """Latest Ubuntu 22.04 amd64 AMI via the public SSM parameter."""
-    import boto3
-    ssm = boto3.client("ssm", region_name=region)
-    p = ("/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/"
-         "hvm/ebs-gp3/ami-id")
-    return ssm.get_parameter(Name=p)["Parameter"]["Value"]
+    """Latest Canonical Ubuntu 22.04 amd64 server AMI via ``DescribeImages``.
+
+    We look the image up directly (Canonical owner ``099720109477``) rather than
+    via the public SSM parameter path: SSM's ``get-parameter`` is not reachable in
+    every account (locked-down IAM returns ``ParameterNotFound``), whereas
+    ``ec2:DescribeImages`` is already required for the launch. Sort the available
+    ``hvm-ssd*`` (gp2 or gp3) images by creation date and take the newest.
+    """
+    resp = ec2.describe_images(
+        Owners=["099720109477"],
+        Filters=[
+            {"Name": "name",
+             "Values": ["ubuntu/images/hvm-ssd*/ubuntu-jammy-22.04-amd64-server-*"]},
+            {"Name": "state", "Values": ["available"]},
+        ],
+    )
+    images = sorted(resp["Images"], key=lambda im: im["CreationDate"])
+    if not images:
+        raise SystemExit(
+            f"no Canonical Ubuntu 22.04 amd64 AMI found in {region}; pass --ami")
+    return images[-1]["ImageId"]
 
 
 def launch(args: argparse.Namespace) -> None:

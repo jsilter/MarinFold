@@ -39,8 +39,8 @@ size estimate (it scans 50k rows, not 1.1B).
 Edit the `CONFIG` block at the top of `create_dataset.sh` first (see below), then:
 
 ```bash
-./create_dataset.sh prep-ref    # one-time: pull afdb-24M seqs from the HF bucket
-                                #   -> FASTA -> s3://$BUCKET/refs/afdb_ref.fasta
+./create_dataset.sh prep-ref    # one-time: afdb-24M struct-cluster rep seqs (exp41
+                                #   MMseqs DB) -> FASTA -> s3://$BUCKET/refs/afdb_ref.fasta
 ./create_dataset.sh smoke       # capped EC2 run (~$1) to validate the cloud path
 ./create_dataset.sh run         # full funnel on EC2 -> selected_manifest.csv in S3
 ./create_dataset.sh manifest    # download the manifest locally
@@ -60,12 +60,16 @@ never pushes on its own.
 
 ## Config you must set (`create_dataset.sh`)
 
-- `BUCKET` — an S3 bucket you own in `us-west-2`.
-- `IAM_PROFILE` — an instance profile with S3 read/write on that bucket.
-- `HF_AFDB_PREFIX`, `AFDB_ID_COL`, `AFDB_SEQ_COL` — where the afdb-24M sequences live
-  in `hf://buckets/open-athena/MarinFold` and their parquet column names
-  (`hf buckets ls hf://buckets/open-athena/MarinFold` to find them). These are
-  placeholders until confirmed.
+- `BUCKET` — an S3 bucket you own in `us-west-2` whose name starts with `marinfold`
+  (default `marinfold-exp91-usw2`, already created).
+- `IAM_PROFILE` — the EC2 instance profile whose role can read/write `marinfold*`
+  buckets. Its name may differ from the role (`marinfold-exp91-instance-role`); a
+  wrong name fails `RunInstances` immediately with `Invalid IAM Instance Profile
+  name`, so `smoke` is a cheap probe.
+- `EXP41_REP_DB` — path to exp41's MMseqs/Foldseek target DB (the afdb-24M
+  struct-cluster reps). `prep-ref` runs `mmseqs convert2fasta` on it to build the
+  novelty reference (~1.33M seqs). No 1.2 TB `timodonnell/afdb-24M` download: that
+  repo has no sequence column, only mmCIF text.
 
 ## The two knobs that set quality and size
 
@@ -79,9 +83,14 @@ never pushes on its own.
 
 ## Running it in a locked-down AWS account
 
-`run_aws.py` needs `ec2:RunInstances`, `iam:PassRole` (on the instance-profile role),
-`s3:*` on `$BUCKET`, and read EC2/SSM for the AMI lookup. With those granted, no
-static access keys are required — AWS CloudShell runs as your identity and the
-launcher picks up its credentials automatically. The full least-privilege IAM policy
-and the resources an account admin must provision are in the PR description for this
-branch.
+`run_aws.py` needs `ec2:RunInstances` (+ `DescribeImages`/`DescribeInstances`/
+`CreateTags`/`TerminateInstances`), `iam:PassRole` on the instance-profile role, and
+read/write S3 on the `marinfold*` buckets. With those granted, **no static access
+keys are required** — run everything from AWS CloudShell (us-west-2), which executes
+as your IAM identity and the launcher picks up credentials automatically.
+
+The AMI is resolved with `ec2:DescribeImages` (Canonical owner `099720109477`), not
+the public SSM parameter: `ssm:GetParameter` is unreliable in locked-down accounts
+(returns `ParameterNotFound`). The exact IAM policy and the resources an admin must
+provision (the instance-profile/role and any bucket) are an account-provisioning
+matter handled with the account admin, not tracked here.
