@@ -51,8 +51,38 @@ SCRIPTS = ["pipeline.py", "atlas_io.py", "selection.py", "funnel.py",
 
 # Cloud-init bootstrap. {placeholders} are filled by render_user_data().
 USER_DATA_TMPL = r"""#!/bin/bash
-set -euxo pipefail
 exec > /var/log/marinfold-pipeline.log 2>&1
+
+# ------------------------------- fire-and-forget safety -------------------------
+# This box is meant to be launched and forgotten, so termination must be
+# guaranteed on EVERY exit path — success, pipeline failure, OR a crash during
+# bootstrap (apt/pip/mmseqs) that would otherwise leave it running idle forever.
+#
+#  1. Hard 48h cap via a scheduled shutdown, set before anything can fail. Even if
+#     the whole script wedges, the instance powers off (and with
+#     InstanceInitiatedShutdownBehavior=terminate, terminates -> billing stops,
+#     the DeleteOnTermination volume is freed). 48h is well above the ~12-30h
+#     expected runtime; lower it if you want a tighter ceiling.
+#  2. An EXIT trap that uploads whatever /opt/work has plus the log, drops a
+#     _DONE / _FAILED marker, and powers off. `shutdown` and coreutils always
+#     exist, so this fires even if apt never installed awscli (the S3 copies just
+#     no-op in that case, but the box still terminates).
+shutdown -h +2880 "marinfold-exp91 48h safety cap" || true
+# NB: the function braces are doubled ({{ }}) so str.format() leaves them intact
+# and only fills the {output} placeholders.
+finish() {{
+  rc=$?
+  aws s3 cp --recursive /opt/work {output}/ 2>/dev/null || true
+  aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log 2>/dev/null || true
+  if [ -f /opt/work/_pipeline_ok ]; then echo ok | aws s3 cp - {output}/_DONE 2>/dev/null || true
+  else echo "rc=$rc" | aws s3 cp - {output}/_FAILED 2>/dev/null || true; fi
+  shutdown -c 2>/dev/null || true   # cancel the 48h cap, then go now
+  shutdown -h now
+}}
+trap finish EXIT
+# --------------------------------------------------------------------------------
+
+set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y python3-pip awscli wget tar
@@ -76,18 +106,13 @@ tar xzf scripts.tar.gz
 REF={afdb_ref_uri}
 if [[ "$REF" == s3://* ]]; then aws s3 cp "$REF" afdb_ref.fasta; else wget -q -O afdb_ref.fasta "$REF"; fi
 
-# Run the funnel. Failure still uploads the log + a _FAILED marker for debugging.
-set +e
+# Run the funnel. On success, drop the marker the EXIT trap checks for; on any
+# failure the trap still uploads the partial work + log + a _FAILED marker.
+mkdir -p /opt/work
 python3 pipeline.py --work-dir /opt/work --stage all \
     --afdb-ref afdb_ref.fasta --eval-ref eval_seqs.fasta \
     {pipeline_args}
-RC=$?
-set -e
-
-aws s3 cp --recursive /opt/work {output}/ || true
-aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log || true
-if [[ $RC -eq 0 ]]; then echo ok | aws s3 cp - {output}/_DONE; else echo "rc=$RC" | aws s3 cp - {output}/_FAILED; fi
-shutdown -h now
+touch /opt/work/_pipeline_ok
 """
 
 
