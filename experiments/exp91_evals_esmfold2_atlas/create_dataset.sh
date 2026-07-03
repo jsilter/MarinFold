@@ -25,6 +25,8 @@ REGION="us-west-2"
 IAM_PROFILE="marinfold-exp91-instance-profile"   # EC2 instance profile wrapping role marinfold-exp91-instance-role
 INSTANCE_TYPE="r7i.16xlarge"              # big-RAM CPU; scale to survivor count
 SMOKE_LIMIT="2000000"                     # rows scanned in the smoke run
+VOLUME_GB="2000"                          # root EBS: full-scale .m8 + linclust scratch (~1-2 TB)
+SMOKE_VOLUME_GB="300"                     # smoke doesn't need the big scratch volume
 
 # --- AFDB novelty reference (afdb-24M struct-cluster reps, via exp41) ----------
 # The novelty stage drops Atlas proteins already represented in our training set
@@ -145,6 +147,7 @@ launch() {  # $1 = output prefix, remaining args appended to run_aws.py
     --iam-instance-profile "$IAM_PROFILE" \
     --region "$REGION" \
     --instance-type "$INSTANCE_TYPE" \
+    --volume-size-gb "$VOLUME_GB" \
     --min-plddt "$MIN_PLDDT" --min-ptm "$MIN_PTM" \
     --max-afdb-seq-id "$MAX_AFDB_SEQ_ID" --eval-max-seq-id "$EVAL_MAX_SEQ_ID" \
     --cluster-id "$CLUSTER_ID" --reps-per-cluster "$REPS_PER_CLUSTER" \
@@ -153,7 +156,8 @@ launch() {  # $1 = output prefix, remaining args appended to run_aws.py
 
 smoke() {
   echo "[smoke] capped run (--limit ${SMOKE_LIMIT}) -> ${SMOKE_OUT}"
-  launch "$SMOKE_OUT" --limit "$SMOKE_LIMIT"
+  # Trailing --volume-size-gb overrides the full-run VOLUME_GB (argparse: last wins).
+  launch "$SMOKE_OUT" --limit "$SMOKE_LIMIT" --volume-size-gb "$SMOKE_VOLUME_GB"
   echo "[smoke] check: aws s3 ls ${SMOKE_OUT}/"
 }
 

@@ -152,9 +152,14 @@ def _drop_by_search(query_fasta: Path, target: Path, work: Path, tag: str,
          "--format-output", _SEARCH_FMT, *_threads_arg(threads)])
     if res.stat().st_size == 0:
         return set()
-    hits = pd.read_csv(res, sep="\t", header=None,
-                       names=_SEARCH_FMT.split(","))
-    drop = set(hits["query"].astype(str))
+    # The .m8 has one row per hit, so at full scale it can reach hundreds of GB —
+    # never materialise it as a DataFrame. We only need the set of query ids that
+    # matched, so stream the query column in chunks and accumulate.
+    cols = _SEARCH_FMT.split(",")
+    drop: set[str] = set()
+    for chunk in pd.read_csv(res, sep="\t", header=None, names=cols,
+                             usecols=[cols[0]], dtype=str, chunksize=5_000_000):
+        drop.update(chunk[cols[0]])
     print(f"[{tag}] {len(drop):,} survivors hit at >= {max_seq_id:.0%} id -> dropped")
     return drop
 

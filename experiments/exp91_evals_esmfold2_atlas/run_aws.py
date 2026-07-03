@@ -226,7 +226,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--instance-type", default="r7i.8xlarge",
                     help="big-RAM CPU instance; scale to survivor count")
     ap.add_argument("--ami", default=None, help="override; else latest Ubuntu 22.04")
-    ap.add_argument("--volume-size-gb", type=int, default=500)
+    ap.add_argument("--volume-size-gb", type=int, default=2000,
+                    help="root EBS gp3 size; the full-scale novelty .m8 + linclust "
+                         "scratch needs ~1-2 TB (500 GB is only enough for smoke)")
     ap.add_argument("--key-name", default=None, help="EC2 key pair for SSH (optional)")
     ap.add_argument("--security-group-id", default=None)
     ap.add_argument("--subnet-id", default=None)
