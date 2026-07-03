@@ -22,7 +22,7 @@ set -euo pipefail
 # ============================ CONFIG (edit these) ============================
 BUCKET="marinfold-exp91-usw2"             # S3 bucket you own in us-west-2 (name must start "marinfold")
 REGION="us-west-2"
-IAM_PROFILE="marinfold-exp91-instance-role"   # EC2 instance profile (console names it after the role); smoke probes it
+IAM_PROFILE="marinfold-exp91-instance-profile"   # EC2 instance profile wrapping role marinfold-exp91-instance-role
 INSTANCE_TYPE="r7i.16xlarge"              # big-RAM CPU; scale to survivor count
 SMOKE_LIMIT="2000000"                     # rows scanned in the smoke run
 
