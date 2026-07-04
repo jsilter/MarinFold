@@ -72,14 +72,21 @@ shutdown -h +2880 "marinfold-exp91 48h safety cap" || true
 # and only fills the {output} placeholders.
 finish() {{
   rc=$?
-  aws s3 cp --recursive /opt/work {output}/ 2>/dev/null || true
+  trap - EXIT INT TERM   # de-register so finish runs exactly once
+  # Save the small, critical artifacts FIRST. On a SIGTERM (manual terminate or
+  # the 48h cap) systemd grants only ~90s before SIGKILL — not enough for the full
+  # /opt/work upload — so prioritise the log + status marker, then best-effort the
+  # bulk work dir. On a normal exit there's no time limit and all of it uploads.
   aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log 2>/dev/null || true
   if [ -f /opt/work/_pipeline_ok ]; then echo ok | aws s3 cp - {output}/_DONE 2>/dev/null || true
   else echo "rc=$rc" | aws s3 cp - {output}/_FAILED 2>/dev/null || true; fi
+  aws s3 cp --recursive /opt/work {output}/ 2>/dev/null || true
   shutdown -c 2>/dev/null || true   # cancel the 48h cap, then go now
   shutdown -h now
 }}
-trap finish EXIT
+# Catch signals too (EXIT alone does not fire on a SIGTERM from terminate/timeout),
+# so a killed or capped run still uploads its log + partial results.
+trap finish EXIT INT TERM
 # --------------------------------------------------------------------------------
 
 set -euxo pipefail
