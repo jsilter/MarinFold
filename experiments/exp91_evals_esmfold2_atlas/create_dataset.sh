@@ -28,6 +28,16 @@ SMOKE_LIMIT="2000000"                     # rows scanned in the smoke run
 VOLUME_GB="2000"                          # root EBS: full-scale .m8 + linclust scratch (~1-2 TB)
 SMOKE_VOLUME_GB="300"                     # smoke doesn't need the big scratch volume
 
+# --- optional SSH access (both empty = no SSH; the .live log heartbeat is the
+#     default way to watch a run) -----------------------------------------------
+# Requires an EC2 key pair + a security group opening :22, which in turn need IAM
+# perms the current marinfold-exp91 policy does NOT grant (ec2:CreateKeyPair or
+# ImportKeyPair, ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress). Ask
+# the account admin to grant those or to provision a key pair + SG and hand you
+# the names, then fill these in.
+KEY_NAME=""                               # EC2 key pair name (SSH login)
+SECURITY_GROUP_ID=""                      # sg-... allowing inbound :22 from your IP
+
 # --- AFDB novelty reference (afdb-24M struct-cluster reps, via exp41) ----------
 # The novelty stage drops Atlas proteins already represented in our training set
 # (afdb-24M). The reference is the 1.33M struct-cluster representatives exp41
@@ -148,6 +158,8 @@ launch() {  # $1 = output prefix, remaining args appended to run_aws.py
     --region "$REGION" \
     --instance-type "$INSTANCE_TYPE" \
     --volume-size-gb "$VOLUME_GB" \
+    ${KEY_NAME:+--key-name "$KEY_NAME"} \
+    ${SECURITY_GROUP_ID:+--security-group-id "$SECURITY_GROUP_ID"} \
     --min-plddt "$MIN_PLDDT" --min-ptm "$MIN_PTM" \
     --max-afdb-seq-id "$MAX_AFDB_SEQ_ID" --eval-max-seq-id "$EVAL_MAX_SEQ_ID" \
     --cluster-id "$CLUSTER_ID" --reps-per-cluster "$REPS_PER_CLUSTER" \

@@ -106,6 +106,16 @@ tar xzf scripts.tar.gz
 REF={afdb_ref_uri}
 if [[ "$REF" == s3://* ]]; then aws s3 cp "$REF" afdb_ref.fasta; else wget -q -O afdb_ref.fasta "$REF"; fi
 
+# Heartbeat: publish the live log to S3 every 2 min so the run is observable
+# mid-flight (there is otherwise no window in — no SSH/SSM). Detached so it can't
+# block boot; the shutdown in the exit trap kills it. Writes to a distinct
+# .live key so it never races the final pipeline.log the trap uploads.
+( while true; do
+    aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log.live 2>/dev/null || true
+    sleep 120
+  done ) &
+disown || true
+
 # Run the funnel. On success, drop the marker the EXIT trap checks for; on any
 # failure the trap still uploads the partial work + log + a _FAILED marker.
 mkdir -p /opt/work
