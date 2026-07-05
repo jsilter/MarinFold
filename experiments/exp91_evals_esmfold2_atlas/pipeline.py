@@ -30,8 +30,10 @@ All MMseqs identity thresholds are fraction (0–1). Outputs land under ``--work
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -45,10 +47,41 @@ from selection import select_representatives
 # MMseqs search output columns (fraction-identity ``fident`` is what we threshold on).
 _SEARCH_FMT = "query,target,fident,alnlen,qcov,tcov"
 
+_T0 = time.monotonic()
+
+
+def _mem_avail_gb() -> float:
+    """Available RAM in GB from /proc/meminfo (-1 if unreadable)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable"):
+                    return int(line.split()[1]) / 1e6  # kB -> GB
+    except OSError:
+        pass
+    return -1.0
+
+
+def _resources(work: Path) -> str:
+    """One-line disk + RAM snapshot for the work volume (for progress logging)."""
+    du = shutil.disk_usage(work)
+    return (f"disk {du.used / 1e12:.2f}/{du.total / 1e12:.2f} TB used, "
+            f"{du.free / 1e12:.2f} TB free; RAM avail {_mem_avail_gb():.0f} GB")
+
+
+def _log(msg: str) -> None:
+    """Timestamped, flushed progress line (elapsed seconds since process start).
+
+    Everything the pipeline prints goes to a log that ``run_aws.py`` ships to S3
+    every couple minutes, so verbose, frequently-flushed logging is what keeps a
+    long run observable instead of a black box.
+    """
+    print(f"[{time.monotonic() - _T0:8.1f}s] {msg}", flush=True)
+
 
 def run(cmd: list[str]) -> None:
     """Run a subprocess, streaming output, raising on non-zero exit."""
-    print(f"[run] {' '.join(str(c) for c in cmd)}", flush=True)
+    _log(f"[run] {' '.join(str(c) for c in cmd)}")
     subprocess.run([str(c) for c in cmd], check=True)
 
 
@@ -86,8 +119,25 @@ def stage_scan(
         cols.append("per_residue_plddt")
 
     fasta_path = work / f"survivors_{shard_id}.fasta"
+    meta_path = work / f"survivors_meta_{shard_id}.parquet"
+    # Flush metadata to parquet in row-group batches rather than holding every
+    # survivor's dict in RAM (at ~150M survivors a single list is 100+ GB). The
+    # ParquetWriter is opened lazily on the first flush so the schema matches the
+    # rows actually produced (with/without plddt_std).
     meta_rows: list[dict] = []
+    writer: pq.ParquetWriter | None = None
     n_seen = n_kept = 0
+
+    def flush_meta() -> None:
+        nonlocal writer, meta_rows
+        if not meta_rows:
+            return
+        tbl = pa.Table.from_pylist(meta_rows)
+        if writer is None:
+            writer = pq.ParquetWriter(meta_path, tbl.schema)
+        writer.write_table(tbl)
+        meta_rows = []
+
     scanner = ds.scanner(columns=cols, offset=start, limit=stop - start,
                          batch_size=batch_rows)
     with open(fasta_path, "w") as fasta:
@@ -112,13 +162,23 @@ def stage_scan(
                 fasta.write(f">{h}\n{seq}\n")
                 meta_rows.append(row)
                 n_kept += 1
-            if n_seen % (batch_rows * 50) < batch_rows:
-                print(f"[scan] seen {n_seen:,} kept {n_kept:,}", flush=True)
-
-    pq.write_table(pa.Table.from_pylist(meta_rows),
-                   work / f"survivors_meta_{shard_id}.parquet")
-    print(f"[scan] done: kept {n_kept:,}/{n_seen:,} "
-          f"({n_kept / max(1, n_seen):.1%}) -> {fasta_path}", flush=True)
+                if len(meta_rows) >= 1_000_000:
+                    flush_meta()
+            if n_seen % (batch_rows * 20) < batch_rows:
+                _log(f"[scan] seen {n_seen:,} kept {n_kept:,} "
+                     f"({n_kept / max(1, n_seen):.1%}); {_resources(work)}")
+    flush_meta()
+    if writer is not None:
+        writer.close()
+    else:  # no survivors at all — still emit an empty parquet with the schema
+        schema_cols = {"protein_hash": pa.string(), "seq_len": pa.int64(),
+                       "mean_plddt": pa.float64(), "ptm": pa.float64()}
+        if compute_plddt_std:
+            schema_cols["plddt_std"] = pa.float64()
+        pq.write_table(pa.table({k: pa.array([], type=t)
+                                 for k, t in schema_cols.items()}), meta_path)
+    _log(f"[scan] done: kept {n_kept:,}/{n_seen:,} "
+         f"({n_kept / max(1, n_seen):.1%}) -> {fasta_path}")
 
 
 def _merge_shards(work: Path) -> tuple[Path, Path]:
@@ -132,35 +192,86 @@ def _merge_shards(work: Path) -> tuple[Path, Path]:
     meta = pa.concat_tables(metas)
     meta_path = work / "survivors_meta.parquet"
     pq.write_table(meta, meta_path)
-    print(f"[merge] {meta.num_rows:,} survivors from {len(shards)} shard(s)")
+    _log(f"[merge] {meta.num_rows:,} survivors from {len(shards)} shard(s)")
     return fasta, meta_path
 
 
 # ------------------------------------------------------------ mmseqs drop helpers
 
+def _split_fasta(src: Path, out_dir: Path, chunk_seqs: int) -> list[Path]:
+    """Split ``src`` into FASTA files of at most ``chunk_seqs`` records each.
+
+    Streaming, one pass, constant memory (never loads the FASTA). Returns the chunk
+    paths in order.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    parts: list[Path] = []
+    fout = None
+    n_in_chunk = 0
+    with open(src) as fin:
+        for line in fin:
+            if line.startswith(">"):
+                if fout is None or n_in_chunk >= chunk_seqs:
+                    if fout is not None:
+                        fout.close()
+                    p = out_dir / f"chunk_{len(parts):05d}.fasta"
+                    parts.append(p)
+                    fout = open(p, "w")
+                    n_in_chunk = 0
+                n_in_chunk += 1
+            fout.write(line)
+    if fout is not None:
+        fout.close()
+    return parts
+
+
 def _drop_by_search(query_fasta: Path, target: Path, work: Path, tag: str,
-                    max_seq_id: float, cov: float, threads: int) -> set[str]:
-    """Return query ids with a target hit ≥ ``max_seq_id`` identity (to be dropped).
+                    max_seq_id: float, cov: float, threads: int, *,
+                    chunk_seqs: int, split_memory_limit: str | None) -> set[str]:
+    """Return query ids with a target hit ≥ ``max_seq_id`` identity (to drop).
+
+    The query set is searched in **chunks of ``chunk_seqs`` sequences**, not all at
+    once: a single ``easy-search`` over ~150M queries drove MMseqs into split-
+    prefilter mode and produced multiple TB of scratch that overran the disk and
+    wedged the run. Chunking bounds both peak RAM and peak disk to one chunk's
+    worth, and we delete each chunk's scratch + ``.m8`` immediately after pulling
+    the matched query ids out of it (the ``.m8`` itself would otherwise reach
+    hundreds of GB). ``--split-memory-limit`` is passed through as an extra RAM cap.
 
     ``--min-seq-id`` makes MMseqs report only hits at/above the threshold, so any
     query appearing in the result has a too-similar match.
     """
-    res = work / f"{tag}.m8"
-    tmp = work / f"_tmp_{tag}"
-    run(["mmseqs", "easy-search", query_fasta, target, res, tmp,
-         "--min-seq-id", max_seq_id, "-c", cov, "--cov-mode", 1,
-         "--format-output", _SEARCH_FMT, *_threads_arg(threads)])
-    if res.stat().st_size == 0:
-        return set()
-    # The .m8 has one row per hit, so at full scale it can reach hundreds of GB —
-    # never materialise it as a DataFrame. We only need the set of query ids that
-    # matched, so stream the query column in chunks and accumulate.
     cols = _SEARCH_FMT.split(",")
+    chunk_dir = work / f"_chunks_{tag}"
+    parts = _split_fasta(query_fasta, chunk_dir, chunk_seqs)
+    _log(f"[{tag}] query split into {len(parts)} chunk(s) of <= {chunk_seqs:,} seqs")
+
     drop: set[str] = set()
-    for chunk in pd.read_csv(res, sep="\t", header=None, names=cols,
-                             usecols=[cols[0]], dtype=str, chunksize=5_000_000):
-        drop.update(chunk[cols[0]])
-    print(f"[{tag}] {len(drop):,} survivors hit at >= {max_seq_id:.0%} id -> dropped")
+    for i, part in enumerate(parts):
+        res = work / f"{tag}_{i:05d}.m8"
+        tmp = work / f"_tmp_{tag}_{i:05d}"
+        t0 = time.monotonic()
+        cmd = ["mmseqs", "easy-search", part, target, res, tmp,
+               "--min-seq-id", max_seq_id, "-c", cov, "--cov-mode", 1,
+               "--format-output", _SEARCH_FMT, *_threads_arg(threads)]
+        if split_memory_limit:
+            cmd += ["--split-memory-limit", split_memory_limit]
+        run(cmd)
+        before = len(drop)
+        if res.exists() and res.stat().st_size > 0:
+            for ch in pd.read_csv(res, sep="\t", header=None, names=cols,
+                                  usecols=[cols[0]], dtype=str, chunksize=2_000_000):
+                drop.update(ch[cols[0]])
+        # Free this chunk's scratch immediately so nothing accumulates on disk.
+        shutil.rmtree(tmp, ignore_errors=True)
+        res.unlink(missing_ok=True)
+        part.unlink(missing_ok=True)
+        _log(f"[{tag}] chunk {i + 1}/{len(parts)}: +{len(drop) - before:,} hit "
+             f"({len(drop):,} dropped so far) in {time.monotonic() - t0:.0f}s; "
+             f"{_resources(work)}")
+
+    shutil.rmtree(chunk_dir, ignore_errors=True)
+    _log(f"[{tag}] {len(drop):,} queries hit at >= {max_seq_id:.0%} id -> dropped")
     return drop
 
 
@@ -180,32 +291,41 @@ def _subset_fasta(src: Path, keep: set[str], dst: Path) -> int:
 
 
 def stage_filter(work: Path, *, ref: Path, tag: str, max_seq_id: float,
-                 cov: float, threads: int) -> None:
+                 cov: float, threads: int, chunk_seqs: int,
+                 split_memory_limit: str | None) -> None:
     """Drop survivors too similar to ``ref`` (novelty or leakage)."""
     cur = work / "survivors.fasta"
     meta = pq.read_table(work / "survivors_meta.parquet").column("protein_hash")
     all_ids = set(meta.to_pylist())
-    drop = _drop_by_search(cur, ref, work, tag, max_seq_id, cov, threads)
+    _log(f"[{tag}] {len(all_ids):,} survivors in; searching vs {ref}")
+    drop = _drop_by_search(cur, ref, work, tag, max_seq_id, cov, threads,
+                           chunk_seqs=chunk_seqs,
+                           split_memory_limit=split_memory_limit)
     keep = all_ids - drop
     kept = _subset_fasta(cur, keep, work / f"survivors_{tag}.fasta")
     (work / f"survivors_{tag}.fasta").replace(cur)  # advance the working fasta
-    print(f"[{tag}] kept {kept:,}/{len(all_ids):,}")
+    _log(f"[{tag}] kept {kept:,}/{len(all_ids):,}")
 
 
 # ------------------------------------------------------------------- cluster/select
 
-def stage_cluster(work: Path, *, cluster_id: float, cov: float, threads: int) -> None:
+def stage_cluster(work: Path, *, cluster_id: float, cov: float, threads: int,
+                  split_memory_limit: str | None) -> None:
     """linclust the surviving sequences; write ``cluster_map.csv`` (hash,cluster_id)."""
     pref = work / "clu"
     tmp = work / "_tmp_clu"
-    run(["mmseqs", "easy-linclust", work / "survivors.fasta", pref, tmp,
-         "--min-seq-id", cluster_id, "-c", cov, "--cov-mode", 1,
-         *_threads_arg(threads)])
+    cmd = ["mmseqs", "easy-linclust", work / "survivors.fasta", pref, tmp,
+           "--min-seq-id", cluster_id, "-c", cov, "--cov-mode", 1,
+           *_threads_arg(threads)]
+    if split_memory_limit:
+        cmd += ["--split-memory-limit", split_memory_limit]
+    run(cmd)
+    shutil.rmtree(tmp, ignore_errors=True)  # linclust scratch is large + useless
     tsv = pref.with_name("clu_cluster.tsv")  # mmseqs writes <pref>_cluster.tsv
     cm = pd.read_csv(tsv, sep="\t", header=None,
                      names=["cluster_id", "protein_hash"])
     cm.to_csv(work / "cluster_map.csv", index=False)
-    print(f"[cluster] {cm['cluster_id'].nunique():,} clusters over {len(cm):,} seqs")
+    _log(f"[cluster] {cm['cluster_id'].nunique():,} clusters over {len(cm):,} seqs")
 
 
 def stage_select(work: Path, *, reps_per_cluster: int, select_by: str,
@@ -222,8 +342,8 @@ def stage_select(work: Path, *, reps_per_cluster: int, select_by: str,
                                  min_cluster_size=min_cluster_size)
     out = work / "selected_manifest.csv"
     sel.to_csv(out, index=False)
-    print(f"[select] {len(sel):,} reps from {frame['cluster_id'].nunique():,} "
-          f"clusters -> {out}")
+    _log(f"[select] {len(sel):,} reps from {frame['cluster_id'].nunique():,} "
+         f"clusters -> {out}")
 
 
 # ------------------------------------------------------------------------- main
@@ -260,41 +380,62 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--select-by", default="esmfold2")
     ap.add_argument("--min-cluster-size", type=int, default=1)
     ap.add_argument("--threads", type=int, default=0, help="0 = mmseqs default")
+    # scaling knobs for the mmseqs stages (see _drop_by_search)
+    ap.add_argument("--query-chunk-seqs", type=int, default=5_000_000,
+                    help="novelty/leakage: sequences per query chunk (bounds RAM + "
+                         "disk; one easy-search over all ~150M queries overruns both)")
+    ap.add_argument("--split-memory-limit", default=None,
+                    help="mmseqs --split-memory-limit (e.g. 100G); extra RAM cap for "
+                         "search + linclust. Default: mmseqs auto")
     args = ap.parse_args(argv)
 
     work = args.work_dir
     work.mkdir(parents=True, exist_ok=True)
     threads = args.threads or 0
+    _log(f"pipeline start: stage={args.stage} work={work}; {_resources(work)}")
 
-    def do_scan() -> None:
-        stage_scan(work, min_len=args.min_len, max_len=args.max_len,
-                   min_plddt=args.min_plddt, min_ptm=args.min_ptm,
-                   compute_plddt_std=args.compute_plddt_std,
-                   num_shards=args.num_shards, shard_id=args.shard_id,
-                   limit=args.limit, batch_rows=args.batch_rows)
+    def _run_stage(name: str, fn) -> None:
+        _log(f"=== stage {name}: START — {_resources(work)}")
+        t0 = time.monotonic()
+        fn()
+        _log(f"=== stage {name}: DONE in {time.monotonic() - t0:.0f}s — "
+             f"{_resources(work)}")
 
     if args.stage in ("all", "scan"):
-        do_scan()
+        _run_stage("scan", lambda: stage_scan(
+            work, min_len=args.min_len, max_len=args.max_len,
+            min_plddt=args.min_plddt, min_ptm=args.min_ptm,
+            compute_plddt_std=args.compute_plddt_std,
+            num_shards=args.num_shards, shard_id=args.shard_id,
+            limit=args.limit, batch_rows=args.batch_rows))
     if args.stage in ("all", "merge"):
-        _merge_shards(work)
+        _run_stage("merge", lambda: _merge_shards(work))
     if args.stage in ("all", "novelty"):
         if not args.afdb_ref:
             sys.exit("--afdb-ref required for the novelty stage")
-        stage_filter(work, ref=args.afdb_ref, tag="novelty",
-                     max_seq_id=args.max_afdb_seq_id, cov=args.search_cov,
-                     threads=threads)
+        _run_stage("novelty", lambda: stage_filter(
+            work, ref=args.afdb_ref, tag="novelty",
+            max_seq_id=args.max_afdb_seq_id, cov=args.search_cov, threads=threads,
+            chunk_seqs=args.query_chunk_seqs,
+            split_memory_limit=args.split_memory_limit))
     if args.stage in ("all", "leakage"):
         if not args.eval_ref:
             sys.exit("--eval-ref required for the leakage stage")
-        stage_filter(work, ref=args.eval_ref, tag="leakage",
-                     max_seq_id=args.eval_max_seq_id, cov=args.search_cov,
-                     threads=threads)
+        _run_stage("leakage", lambda: stage_filter(
+            work, ref=args.eval_ref, tag="leakage",
+            max_seq_id=args.eval_max_seq_id, cov=args.search_cov, threads=threads,
+            chunk_seqs=args.query_chunk_seqs,
+            split_memory_limit=args.split_memory_limit))
     if args.stage in ("all", "cluster"):
-        stage_cluster(work, cluster_id=args.cluster_id, cov=args.cluster_cov,
-                      threads=threads)
+        _run_stage("cluster", lambda: stage_cluster(
+            work, cluster_id=args.cluster_id, cov=args.cluster_cov,
+            threads=threads, split_memory_limit=args.split_memory_limit))
     if args.stage in ("all", "select"):
-        stage_select(work, reps_per_cluster=args.reps_per_cluster,
-                     select_by=args.select_by, min_cluster_size=args.min_cluster_size)
+        _run_stage("select", lambda: stage_select(
+            work, reps_per_cluster=args.reps_per_cluster,
+            select_by=args.select_by, min_cluster_size=args.min_cluster_size))
+
+    _log("pipeline: ALL STAGES COMPLETE")
 
 
 if __name__ == "__main__":

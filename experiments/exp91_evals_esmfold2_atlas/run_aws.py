@@ -80,7 +80,9 @@ finish() {{
   aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log 2>/dev/null || true
   if [ -f /opt/work/_pipeline_ok ]; then echo ok | aws s3 cp - {output}/_DONE 2>/dev/null || true
   else echo "rc=$rc" | aws s3 cp - {output}/_FAILED 2>/dev/null || true; fi
-  aws s3 cp --recursive /opt/work {output}/ 2>/dev/null || true
+  # Skip mmseqs scratch dirs (_tmp_*, _chunks_*) — worthless, and can be multi-TB.
+  aws s3 cp --recursive /opt/work {output}/ \
+    --exclude "_tmp*" --exclude "_chunks*" 2>/dev/null || true
   shutdown -c 2>/dev/null || true   # cancel the 48h cap, then go now
   shutdown -h now
 }}
@@ -146,6 +148,9 @@ def build_pipeline_args(args: argparse.Namespace) -> str:
         parts.append("--compute-plddt-std")
     if args.limit is not None:
         parts += ["--limit", args.limit]
+    parts += ["--query-chunk-seqs", args.query_chunk_seqs]
+    if args.split_memory_limit:
+        parts += ["--split-memory-limit", args.split_memory_limit]
     return " ".join(str(p) for p in parts)
 
 
@@ -286,6 +291,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--compute-plddt-std", action="store_true")
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--limit", type=int, default=None, help="cap rows (smoke test)")
+    ap.add_argument("--query-chunk-seqs", type=int, default=5_000_000,
+                    help="novelty/leakage query-chunk size (bounds mmseqs RAM+disk)")
+    ap.add_argument("--split-memory-limit", default=None,
+                    help="mmseqs --split-memory-limit (e.g. 100G); extra RAM cap")
     ap.add_argument("--dry-run", action="store_true",
                     help="print user-data + config; touch nothing")
     args = ap.parse_args(argv)

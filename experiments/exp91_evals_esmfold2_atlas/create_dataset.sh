@@ -60,6 +60,18 @@ EVAL_MAX_SEQ_ID="0.40"                    # leakage: drop >=40% id to eval set
 CLUSTER_ID="0.40"                         # linclust identity (size dial)
 REPS_PER_CLUSTER="1"
 
+# --- mmseqs scaling (the novelty search is the heavy stage, not the scan) ------
+# The first full run wedged because a single easy-search over ~150M survivors blew
+# past RAM+disk. pipeline.py now searches the query set in chunks of this size and
+# deletes each chunk's scratch immediately. SPLIT_MEMORY_LIMIT is an extra RAM cap.
+QUERY_CHUNK_SEQS="5000000"                # survivor seqs per novelty/leakage chunk
+SPLIT_MEMORY_LIMIT=""                     # e.g. 100G; empty = mmseqs auto
+
+# --- mid-scale test run (validate scaling before a full run) ------------------
+TEST_LIMIT="40000000"                     # ~40M rows (~20x the smoke, ~3M survivors)
+TEST_INSTANCE_TYPE="r7i.8xlarge"          # smaller box; test doesn't need 768 GB
+TEST_VOLUME_GB="600"
+
 # --- local-smoke knobs --------------------------------------------------------
 LOCAL_SMOKE_LIMIT="50000"                 # Atlas rows scanned in the local smoke
 LOCAL_WORK="${LOCAL_WORK:-_localsmoke}"   # scratch dir (gitignored); wiped each run
@@ -70,6 +82,7 @@ EVAL_SEQS_CSV="../exp65_evals_low_msa_depth_proteins/data/candidate_sequences.cs
 STAGING="s3://${BUCKET}/exp91/staging"
 OUT="s3://${BUCKET}/exp91/out"
 SMOKE_OUT="s3://${BUCKET}/exp91/smoke"
+TEST_OUT="s3://${BUCKET}/exp91/test"
 AFDB_REF_S3="s3://${BUCKET}/refs/afdb_ref.fasta"
 AFDB_LOCAL_DIR="${AFDB_LOCAL_DIR:-data/_afdb_ref}"     # local scratch (gitignored)
 AFDB_FASTA="${AFDB_LOCAL_DIR}/afdb_ref.fasta"
@@ -163,6 +176,8 @@ launch() {  # $1 = output prefix, remaining args appended to run_aws.py
     --min-plddt "$MIN_PLDDT" --min-ptm "$MIN_PTM" \
     --max-afdb-seq-id "$MAX_AFDB_SEQ_ID" --eval-max-seq-id "$EVAL_MAX_SEQ_ID" \
     --cluster-id "$CLUSTER_ID" --reps-per-cluster "$REPS_PER_CLUSTER" \
+    --query-chunk-seqs "$QUERY_CHUNK_SEQS" \
+    ${SPLIT_MEMORY_LIMIT:+--split-memory-limit "$SPLIT_MEMORY_LIMIT"} \
     --compute-plddt-std --watch "$@"
 }
 
@@ -171,6 +186,17 @@ smoke() {
   # Trailing --volume-size-gb overrides the full-run VOLUME_GB (argparse: last wins).
   launch "$SMOKE_OUT" --limit "$SMOKE_LIMIT" --volume-size-gb "$SMOKE_VOLUME_GB"
   echo "[smoke] check: aws s3 ls ${SMOKE_OUT}/"
+}
+
+test-run() {
+  # Mid-scale validation before committing to the full 1.1B run: ~40M rows on a
+  # smaller box, so the chunked novelty search + logging get exercised at a scale
+  # where the old code would already have thrashed. Watch pipeline.log.live.
+  echo "[test] ${TEST_LIMIT} rows on ${TEST_INSTANCE_TYPE} -> ${TEST_OUT}"
+  # Trailing overrides win (argparse: last wins) over the full-run defaults.
+  launch "$TEST_OUT" --limit "$TEST_LIMIT" \
+    --instance-type "$TEST_INSTANCE_TYPE" --volume-size-gb "$TEST_VOLUME_GB"
+  echo "[test] live log: aws s3 cp ${TEST_OUT}/pipeline.log.live -"
 }
 
 run() {
@@ -188,8 +214,9 @@ case "${1:-}" in
   local-smoke) local_smoke ;;
   prep-ref)    prep_ref ;;
   smoke)       smoke ;;
+  test)        test-run ;;
   run)         run ;;
   manifest)    manifest ;;
   all)         prep_ref; run; manifest ;;
-  *) echo "usage: $0 {local-smoke|prep-ref|smoke|run|manifest|all}" >&2; exit 2 ;;
+  *) echo "usage: $0 {local-smoke|prep-ref|smoke|test|run|manifest|all}" >&2; exit 2 ;;
 esac
