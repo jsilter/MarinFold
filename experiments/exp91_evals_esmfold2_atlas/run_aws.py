@@ -121,13 +121,20 @@ if [[ "$REF" == s3://* ]]; then aws s3 cp "$REF" afdb_ref.fasta; else wget -q -O
 # .live key so it never races the final pipeline.log the trap uploads.
 ( while true; do
     aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log.live 2>/dev/null || true
+    aws s3 sync /opt/work {output}/ --exclude "*" --include "_progress_*/*" 2>/dev/null || true
     sleep 120
   done ) &
 disown || true
 
+# Resume: pull any prior novelty/leakage chunk checkpoints so a relaunch continues
+# from the last finished chunk instead of restarting the multi-hour search. No-op
+# on a fresh run. The ~37-min scan re-runs deterministically, regenerating the same
+# survivors -> same chunk splits, so an earlier chunk's drop file stays valid.
+mkdir -p /opt/work
+aws s3 sync {output}/ /opt/work/ --exclude "*" --include "_progress_*/*" 2>/dev/null || true
+
 # Run the funnel. On success, drop the marker the EXIT trap checks for; on any
 # failure the trap still uploads the partial work + log + a _FAILED marker.
-mkdir -p /opt/work
 python3 pipeline.py --work-dir /opt/work --stage all \
     --afdb-ref afdb_ref.fasta --eval-ref eval_seqs.fasta \
     {pipeline_args}

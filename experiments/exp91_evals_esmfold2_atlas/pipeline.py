@@ -31,6 +31,7 @@ All MMseqs identity thresholds are fraction (0–1). Outputs land under ``--work
 
 import argparse
 import multiprocessing as mp
+import os
 import shutil
 import subprocess
 import sys
@@ -308,11 +309,28 @@ def _drop_by_search(query_fasta: Path, target_fasta: Path, work: Path, tag: str,
 
     chunk_dir = work / f"_chunks_{tag}"
     parts = _split_fasta(query_fasta, chunk_dir, chunk_seqs)
+    # Per-chunk drop-id checkpoints. run_aws syncs this dir to S3 every ~2 min and
+    # pulls it back on a relaunch, so a crash / spot-interrupt / 48h-cap resumes
+    # from the last finished chunk instead of restarting the ~30h search. The scan
+    # is deterministic, so the same survivors.fasta -> same chunk splits -> a prior
+    # chunk's drop file is still valid.
+    progress_dir = work / f"_progress_{tag}"
+    progress_dir.mkdir(parents=True, exist_ok=True)
+    done0 = len(list(progress_dir.glob("drop_*.txt")))
     _log(f"[{tag}] query split into {len(parts)} chunk(s) of <= {chunk_seqs:,} seqs; "
-         f"target DB + index prebuilt once")
+         f"target DB prebuilt once; {done0} chunk checkpoint(s) already present")
 
     drop: set[str] = set()
     for i, part in enumerate(parts):
+        ckpt = progress_dir / f"drop_{i:05d}.txt"
+        if ckpt.exists():
+            # Resume: chunk already ran in a prior instance — load its ids, skip.
+            ids = ckpt.read_text().split()
+            drop.update(ids)
+            part.unlink(missing_ok=True)
+            _log(f"[{tag}] chunk {i + 1}/{len(parts)}: resumed from checkpoint "
+                 f"(+{len(ids):,}, {len(drop):,} total)")
+            continue
         t0 = time.monotonic()
         cdir = work / f"_tmp_{tag}_{i:05d}"      # per-chunk query DB + search scratch
         cdir.mkdir(parents=True, exist_ok=True)
@@ -329,16 +347,22 @@ def _drop_by_search(query_fasta: Path, target_fasta: Path, work: Path, tag: str,
              "--cov-mode", 1, *search_extra, *_threads_arg(threads)])
         run(["mmseqs", "convertalis", query_db, target_db, result_db, res,
              "--format-output", _SEARCH_FMT, *_threads_arg(threads)])
-        before = len(drop)
+        chunk_drop: set[str] = set()
         if res.exists() and res.stat().st_size > 0:
             for ch in pd.read_csv(res, sep="\t", header=None, names=cols,
                                   usecols=[cols[0]], dtype=str, chunksize=2_000_000):
-                drop.update(ch[cols[0]])
+                chunk_drop.update(ch[cols[0]])
+        # Checkpoint atomically (write tmp, then rename) so a crash mid-write never
+        # leaves a half-written file that a resume would trust as complete.
+        tmp_ckpt = progress_dir / f"drop_{i:05d}.txt.tmp"
+        tmp_ckpt.write_text("\n".join(chunk_drop))
+        os.replace(tmp_ckpt, ckpt)
+        drop.update(chunk_drop)
         # Free this chunk's scratch immediately so nothing accumulates on disk.
         shutil.rmtree(cdir, ignore_errors=True)
         res.unlink(missing_ok=True)
         part.unlink(missing_ok=True)
-        _log(f"[{tag}] chunk {i + 1}/{len(parts)}: +{len(drop) - before:,} hit "
+        _log(f"[{tag}] chunk {i + 1}/{len(parts)}: +{len(chunk_drop):,} hit "
              f"({len(drop):,} dropped so far) in {time.monotonic() - t0:.0f}s; "
              f"{_resources(work)}")
 
