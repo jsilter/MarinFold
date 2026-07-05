@@ -148,7 +148,8 @@ def build_pipeline_args(args: argparse.Namespace) -> str:
         parts.append("--compute-plddt-std")
     if args.limit is not None:
         parts += ["--limit", args.limit]
-    parts += ["--query-chunk-seqs", args.query_chunk_seqs]
+    parts += ["--query-chunk-seqs", args.query_chunk_seqs,
+              "--scan-workers", args.scan_workers]
     if args.split_memory_limit:
         parts += ["--split-memory-limit", args.split_memory_limit]
     if args.search_sensitivity:
@@ -299,6 +300,8 @@ def main(argv: list[str] | None = None) -> None:
                     help="mmseqs --split-memory-limit (e.g. 100G); extra RAM cap")
     ap.add_argument("--search-sensitivity", default=None,
                     help="mmseqs -s for novelty/leakage (default 5.7)")
+    ap.add_argument("--scan-workers", type=int, default=1,
+                    help="parallel scan processes (set ~vCPU count)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print user-data + config; touch nothing")
     args = ap.parse_args(argv)

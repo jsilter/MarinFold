@@ -69,6 +69,7 @@ REPS_PER_CLUSTER="1"
 QUERY_CHUNK_SEQS="5000000"                # survivor seqs per novelty/leakage chunk
 SPLIT_MEMORY_LIMIT="180G"                 # cap mmseqs RAM (leaves ~76 GB on the 256 GB box for OS + id-sets)
 SEARCH_SENSITIVITY="4.0"                  # mmseqs -s (5.7 default); 4.0 = faster, may miss a few near-40%-id hits
+SCAN_WORKERS="32"                         # parallel scan procs (~vCPU of INSTANCE_TYPE); the scan is CPU-bound
 
 # --- mid-scale test run (validate scaling before a full run) ------------------
 TEST_LIMIT="40000000"                     # ~40M rows (~20x the smoke, ~3M survivors)
@@ -180,6 +181,7 @@ launch() {  # $1 = output prefix, remaining args appended to run_aws.py
     --max-afdb-seq-id "$MAX_AFDB_SEQ_ID" --eval-max-seq-id "$EVAL_MAX_SEQ_ID" \
     --cluster-id "$CLUSTER_ID" --reps-per-cluster "$REPS_PER_CLUSTER" \
     --query-chunk-seqs "$QUERY_CHUNK_SEQS" \
+    --scan-workers "$SCAN_WORKERS" \
     ${SPLIT_MEMORY_LIMIT:+--split-memory-limit "$SPLIT_MEMORY_LIMIT"} \
     ${SEARCH_SENSITIVITY:+--search-sensitivity "$SEARCH_SENSITIVITY"} \
     --compute-plddt-std --watch "$@"

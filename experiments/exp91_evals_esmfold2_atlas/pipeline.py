@@ -30,6 +30,7 @@ All MMseqs identity thresholds are fraction (0–1). Outputs land under ``--work
 """
 
 import argparse
+import multiprocessing as mp
 import shutil
 import subprocess
 import sys
@@ -92,54 +93,43 @@ def _threads_arg(threads: int) -> list[str]:
 
 # --------------------------------------------------------------------------- scan
 
-def stage_scan(
-    work: Path, *, min_len: int, max_len: int, min_plddt: float, min_ptm: float,
-    compute_plddt_std: bool, num_shards: int, shard_id: int, limit: int | None,
-    batch_rows: int,
-) -> None:
-    """Stream ``folds_1B.lance`` and write survivors passing the metadata gates.
+def _scan_range(spec: dict) -> tuple[int, int]:
+    """Scan one contiguous row range and write ``survivors_<tag>.{fasta,parquet}``.
 
-    Reads only metadata columns (``protein_hash, sequence, mean_plddt, ptm`` and,
-    if ``compute_plddt_std``, ``per_residue_plddt``) — never ``structure_blob``.
-    Shard ``shard_id`` of ``num_shards`` processes a contiguous row range so several
-    instances can run the scan in parallel.
+    Top-level (picklable) so it can run in a multiprocessing worker. ``spec`` holds
+    the range (``start``/``stop``), output ``tag``, the metadata gates, and
+    ``batch_rows``. Returns ``(n_seen, n_kept)``. This is the CPU-bound hot loop
+    (per-row pLDDT-std decode), so N of these across cores scan N× faster.
     """
-    ds = atlas_io.open_folds()
-    total = ds.count_rows()
-    shard = total // num_shards
-    start = shard_id * shard
-    stop = total if shard_id == num_shards - 1 else start + shard
-    if limit is not None:
-        stop = min(stop, start + limit)
-    print(f"[scan] rows {start:,}..{stop:,} of {total:,} "
-          f"(shard {shard_id}/{num_shards})", flush=True)
+    work = Path(spec["work"])
+    tag = spec["tag"]
+    start, stop = spec["start"], spec["stop"]
+    compute_plddt_std = spec["compute_plddt_std"]
+    min_len, max_len = spec["min_len"], spec["max_len"]
+    min_plddt, min_ptm = spec["min_plddt"], spec["min_ptm"]
 
     cols = ["protein_hash", "sequence", "mean_plddt", "ptm"]
     if compute_plddt_std:
         cols.append("per_residue_plddt")
 
-    fasta_path = work / f"survivors_{shard_id}.fasta"
-    meta_path = work / f"survivors_meta_{shard_id}.parquet"
-    # Flush metadata to parquet in row-group batches rather than holding every
-    # survivor's dict in RAM (at ~150M survivors a single list is 100+ GB). The
-    # ParquetWriter is opened lazily on the first flush so the schema matches the
-    # rows actually produced (with/without plddt_std).
+    fasta_path = work / f"survivors_{tag}.fasta"
+    meta_path = work / f"survivors_meta_{tag}.parquet"
     meta_rows: list[dict] = []
-    writer: pq.ParquetWriter | None = None
-    n_seen = n_kept = 0
+    writer_box: list = [None]  # lazily-opened ParquetWriter (schema from first flush)
 
     def flush_meta() -> None:
-        nonlocal writer, meta_rows
         if not meta_rows:
             return
         tbl = pa.Table.from_pylist(meta_rows)
-        if writer is None:
-            writer = pq.ParquetWriter(meta_path, tbl.schema)
-        writer.write_table(tbl)
-        meta_rows = []
+        if writer_box[0] is None:
+            writer_box[0] = pq.ParquetWriter(meta_path, tbl.schema)
+        writer_box[0].write_table(tbl)
+        meta_rows.clear()
 
+    ds = atlas_io.open_folds()
     scanner = ds.scanner(columns=cols, offset=start, limit=stop - start,
-                         batch_size=batch_rows)
+                         batch_size=spec["batch_rows"])
+    n_seen = n_kept = 0
     with open(fasta_path, "w") as fasta:
         for batch in scanner.to_batches():
             d = batch.to_pydict()
@@ -164,21 +154,68 @@ def stage_scan(
                 n_kept += 1
                 if len(meta_rows) >= 1_000_000:
                     flush_meta()
-            if n_seen % (batch_rows * 20) < batch_rows:
-                _log(f"[scan] seen {n_seen:,} kept {n_kept:,} "
+            if n_seen % (spec["batch_rows"] * 20) < spec["batch_rows"]:
+                _log(f"[scan {tag}] seen {n_seen:,} kept {n_kept:,} "
                      f"({n_kept / max(1, n_seen):.1%}); {_resources(work)}")
     flush_meta()
-    if writer is not None:
-        writer.close()
-    else:  # no survivors at all — still emit an empty parquet with the schema
+    if writer_box[0] is not None:
+        writer_box[0].close()
+    else:  # no survivors in this range — emit an empty parquet with the schema
         schema_cols = {"protein_hash": pa.string(), "seq_len": pa.int64(),
                        "mean_plddt": pa.float64(), "ptm": pa.float64()}
         if compute_plddt_std:
             schema_cols["plddt_std"] = pa.float64()
         pq.write_table(pa.table({k: pa.array([], type=t)
                                  for k, t in schema_cols.items()}), meta_path)
-    _log(f"[scan] done: kept {n_kept:,}/{n_seen:,} "
-         f"({n_kept / max(1, n_seen):.1%}) -> {fasta_path}")
+    _log(f"[scan {tag}] done: kept {n_kept:,}/{n_seen:,} -> {fasta_path}")
+    return n_seen, n_kept
+
+
+def stage_scan(
+    work: Path, *, min_len: int, max_len: int, min_plddt: float, min_ptm: float,
+    compute_plddt_std: bool, num_shards: int, shard_id: int, limit: int | None,
+    batch_rows: int, scan_workers: int,
+) -> None:
+    """Stream ``folds_1B.lance`` and write survivors passing the metadata gates.
+
+    Reads only metadata columns (``protein_hash, sequence, mean_plddt, ptm`` and,
+    if ``compute_plddt_std``, ``per_residue_plddt``) — never ``structure_blob``.
+    Shard ``shard_id`` of ``num_shards`` processes a contiguous row range (for
+    multi-instance parallelism); within that range, ``scan_workers`` processes each
+    handle a sub-range in parallel, since the per-row loop is CPU-bound. Each
+    (shard, worker) writes its own ``survivors_<tag>.fasta`` that ``merge`` unions.
+    """
+    ds = atlas_io.open_folds()
+    total = ds.count_rows()
+    shard = total // num_shards
+    start = shard_id * shard
+    stop = total if shard_id == num_shards - 1 else start + shard
+    if limit is not None:
+        stop = min(stop, start + limit)
+    n = max(1, scan_workers)
+    _log(f"[scan] rows {start:,}..{stop:,} of {total:,} "
+         f"(shard {shard_id}/{num_shards}, {n} worker(s))")
+
+    # Split [start, stop) into n contiguous sub-ranges, one per worker.
+    span = stop - start
+    bounds = [start + (span * w) // n for w in range(n + 1)]
+    specs = [{"work": str(work), "tag": f"{shard_id}_{w}",
+              "start": bounds[w], "stop": bounds[w + 1],
+              "compute_plddt_std": compute_plddt_std, "batch_rows": batch_rows,
+              "min_len": min_len, "max_len": max_len,
+              "min_plddt": min_plddt, "min_ptm": min_ptm}
+             for w in range(n) if bounds[w + 1] > bounds[w]]
+
+    if len(specs) == 1:
+        totals = [_scan_range(specs[0])]
+    else:
+        ctx = mp.get_context("spawn")  # fork + pyarrow/lance can deadlock
+        with ctx.Pool(len(specs)) as pool:
+            totals = pool.map(_scan_range, specs)
+    seen = sum(s for s, _ in totals)
+    kept = sum(k for _, k in totals)
+    _log(f"[scan] done: kept {kept:,}/{seen:,} ({kept / max(1, seen):.1%}) "
+         f"across {len(specs)} worker(s)")
 
 
 def _merge_shards(work: Path) -> tuple[Path, Path]:
@@ -402,6 +439,9 @@ def main(argv: list[str] | None = None) -> None:
                          "rep-selection criterion (extra read; otherwise select by length)")
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--shard-id", type=int, default=0)
+    ap.add_argument("--scan-workers", type=int, default=1,
+                    help="parallel scan processes on this box (the scan is CPU-bound; "
+                         "set to ~vCPU count to cut the ~9h single-threaded scan)")
     ap.add_argument("--limit", type=int, default=None, help="cap rows (testing)")
     ap.add_argument("--batch-rows", type=int, default=100_000)
     # references
@@ -448,7 +488,8 @@ def main(argv: list[str] | None = None) -> None:
             min_plddt=args.min_plddt, min_ptm=args.min_ptm,
             compute_plddt_std=args.compute_plddt_std,
             num_shards=args.num_shards, shard_id=args.shard_id,
-            limit=args.limit, batch_rows=args.batch_rows))
+            limit=args.limit, batch_rows=args.batch_rows,
+            scan_workers=args.scan_workers))
     if args.stage in ("all", "merge"):
         _run_stage("merge", lambda: _merge_shards(work))
     if args.stage in ("all", "novelty"):
