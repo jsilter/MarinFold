@@ -68,7 +68,7 @@ REPS_PER_CLUSTER="1"
 # deletes each chunk's scratch immediately. SPLIT_MEMORY_LIMIT is an extra RAM cap.
 QUERY_CHUNK_SEQS="5000000"                # survivor seqs per novelty/leakage chunk
 SPLIT_MEMORY_LIMIT="180G"                 # cap mmseqs RAM (leaves ~76 GB on the 256 GB box for OS + id-sets)
-SEARCH_SENSITIVITY=""                     # mmseqs -s (empty = 5.7 default); lower (e.g. 4.0) = faster, less sensitive
+SEARCH_SENSITIVITY="4.0"                  # mmseqs -s (5.7 default); 4.0 = faster, may miss a few near-40%-id hits
 
 # --- mid-scale test run (validate scaling before a full run) ------------------
 TEST_LIMIT="40000000"                     # ~40M rows (~20x the smoke, ~3M survivors)
