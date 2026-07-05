@@ -225,45 +225,80 @@ def _split_fasta(src: Path, out_dir: Path, chunk_seqs: int) -> list[Path]:
     return parts
 
 
-def _drop_by_search(query_fasta: Path, target: Path, work: Path, tag: str,
+def _drop_by_search(query_fasta: Path, target_fasta: Path, work: Path, tag: str,
                     max_seq_id: float, cov: float, threads: int, *,
-                    chunk_seqs: int, split_memory_limit: str | None) -> set[str]:
+                    chunk_seqs: int, split_memory_limit: str | None,
+                    sensitivity: str | None = None) -> set[str]:
     """Return query ids with a target hit ≥ ``max_seq_id`` identity (to drop).
 
     The query set is searched in **chunks of ``chunk_seqs`` sequences**, not all at
     once: a single ``easy-search`` over ~150M queries drove MMseqs into split-
     prefilter mode and produced multiple TB of scratch that overran the disk and
-    wedged the run. Chunking bounds both peak RAM and peak disk to one chunk's
-    worth, and we delete each chunk's scratch + ``.m8`` immediately after pulling
-    the matched query ids out of it (the ``.m8`` itself would otherwise reach
-    hundreds of GB). ``--split-memory-limit`` is passed through as an extra RAM cap.
+    wedged the run. Chunking bounds peak RAM and disk to one chunk, and we delete
+    each chunk's scratch + ``.m8`` immediately after pulling the matched query ids
+    out of it (the ``.m8`` would otherwise reach hundreds of GB).
+
+    The **target DB + prefilter index are built once and reused** for every chunk.
+    ``easy-search`` re-``createdb``s (and re-indexes) the whole reference on every
+    call; for one fixed reference searched by many query chunks that is redundant,
+    so we drop to the lower-level ``createdb``/``createindex``/``search``/
+    ``convertalis`` path and keep the indexed target between chunks. Results are
+    identical to ``easy-search`` (the index is just the precomputed target k-mers).
 
     ``--min-seq-id`` makes MMseqs report only hits at/above the threshold, so any
-    query appearing in the result has a too-similar match.
+    query appearing in the result has a too-similar match. ``sensitivity`` (``-s``)
+    and ``--split-memory-limit`` are passed through to the search when set.
     """
     cols = _SEARCH_FMT.split(",")
+    # createindex and search MUST use the same -s: createindex defaults to 7.5 but
+    # search defaults to 5.7, so a default-built index would silently make the
+    # search more sensitive than plain easy-search. Pin both to the same value
+    # (mmseqs search default 5.7 unless overridden) so results are reproducible.
+    s = sensitivity if sensitivity is not None else "5.7"
+    search_extra: list = ["-s", s]
+    if split_memory_limit:
+        search_extra += ["--split-memory-limit", split_memory_limit]
+
+    # Build the fixed reference DB once (createdb) and reuse it for every chunk;
+    # easy-search would re-createdb the whole reference on each call. We do NOT
+    # createindex: a precomputed index measurably changes prefilter seeding vs
+    # plain easy-search (more hits), and the target createdb — not the in-search
+    # index build — is the redundant work worth removing here.
+    tdir = work / f"_targetdb_{tag}"
+    tdir.mkdir(parents=True, exist_ok=True)
+    target_db = tdir / "targetDB"
+    run(["mmseqs", "createdb", target_fasta, target_db])
+
     chunk_dir = work / f"_chunks_{tag}"
     parts = _split_fasta(query_fasta, chunk_dir, chunk_seqs)
-    _log(f"[{tag}] query split into {len(parts)} chunk(s) of <= {chunk_seqs:,} seqs")
+    _log(f"[{tag}] query split into {len(parts)} chunk(s) of <= {chunk_seqs:,} seqs; "
+         f"target DB + index prebuilt once")
 
     drop: set[str] = set()
     for i, part in enumerate(parts):
-        res = work / f"{tag}_{i:05d}.m8"
-        tmp = work / f"_tmp_{tag}_{i:05d}"
         t0 = time.monotonic()
-        cmd = ["mmseqs", "easy-search", part, target, res, tmp,
-               "--min-seq-id", max_seq_id, "-c", cov, "--cov-mode", 1,
-               "--format-output", _SEARCH_FMT, *_threads_arg(threads)]
-        if split_memory_limit:
-            cmd += ["--split-memory-limit", split_memory_limit]
-        run(cmd)
+        cdir = work / f"_tmp_{tag}_{i:05d}"      # per-chunk query DB + search scratch
+        cdir.mkdir(parents=True, exist_ok=True)
+        query_db = cdir / "queryDB"
+        result_db = cdir / "resultDB"
+        search_tmp = cdir / "search_tmp"
+        res = work / f"{tag}_{i:05d}.m8"
+        run(["mmseqs", "createdb", part, query_db])
+        # --alignment-mode 3 computes exact seq id + coverage so --min-seq-id / -c
+        # filter identically to easy-search (which sets it internally); without it
+        # the bare `search` default lets extra sub-threshold hits through.
+        run(["mmseqs", "search", query_db, target_db, result_db, search_tmp,
+             "--alignment-mode", 3, "--min-seq-id", max_seq_id, "-c", cov,
+             "--cov-mode", 1, *search_extra, *_threads_arg(threads)])
+        run(["mmseqs", "convertalis", query_db, target_db, result_db, res,
+             "--format-output", _SEARCH_FMT, *_threads_arg(threads)])
         before = len(drop)
         if res.exists() and res.stat().st_size > 0:
             for ch in pd.read_csv(res, sep="\t", header=None, names=cols,
                                   usecols=[cols[0]], dtype=str, chunksize=2_000_000):
                 drop.update(ch[cols[0]])
         # Free this chunk's scratch immediately so nothing accumulates on disk.
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(cdir, ignore_errors=True)
         res.unlink(missing_ok=True)
         part.unlink(missing_ok=True)
         _log(f"[{tag}] chunk {i + 1}/{len(parts)}: +{len(drop) - before:,} hit "
@@ -271,6 +306,7 @@ def _drop_by_search(query_fasta: Path, target: Path, work: Path, tag: str,
              f"{_resources(work)}")
 
     shutil.rmtree(chunk_dir, ignore_errors=True)
+    shutil.rmtree(tdir, ignore_errors=True)
     _log(f"[{tag}] {len(drop):,} queries hit at >= {max_seq_id:.0%} id -> dropped")
     return drop
 
@@ -292,7 +328,8 @@ def _subset_fasta(src: Path, keep: set[str], dst: Path) -> int:
 
 def stage_filter(work: Path, *, ref: Path, tag: str, max_seq_id: float,
                  cov: float, threads: int, chunk_seqs: int,
-                 split_memory_limit: str | None) -> None:
+                 split_memory_limit: str | None,
+                 sensitivity: str | None = None) -> None:
     """Drop survivors too similar to ``ref`` (novelty or leakage)."""
     cur = work / "survivors.fasta"
     meta = pq.read_table(work / "survivors_meta.parquet").column("protein_hash")
@@ -300,7 +337,8 @@ def stage_filter(work: Path, *, ref: Path, tag: str, max_seq_id: float,
     _log(f"[{tag}] {len(all_ids):,} survivors in; searching vs {ref}")
     drop = _drop_by_search(cur, ref, work, tag, max_seq_id, cov, threads,
                            chunk_seqs=chunk_seqs,
-                           split_memory_limit=split_memory_limit)
+                           split_memory_limit=split_memory_limit,
+                           sensitivity=sensitivity)
     keep = all_ids - drop
     kept = _subset_fasta(cur, keep, work / f"survivors_{tag}.fasta")
     (work / f"survivors_{tag}.fasta").replace(cur)  # advance the working fasta
@@ -387,6 +425,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--split-memory-limit", default=None,
                     help="mmseqs --split-memory-limit (e.g. 100G); extra RAM cap for "
                          "search + linclust. Default: mmseqs auto")
+    ap.add_argument("--search-sensitivity", default=None,
+                    help="mmseqs -s for novelty/leakage (default mmseqs 5.7). Lower "
+                         "(e.g. 4.0) is faster but may miss some near-threshold hits")
     args = ap.parse_args(argv)
 
     work = args.work_dir
@@ -417,7 +458,8 @@ def main(argv: list[str] | None = None) -> None:
             work, ref=args.afdb_ref, tag="novelty",
             max_seq_id=args.max_afdb_seq_id, cov=args.search_cov, threads=threads,
             chunk_seqs=args.query_chunk_seqs,
-            split_memory_limit=args.split_memory_limit))
+            split_memory_limit=args.split_memory_limit,
+            sensitivity=args.search_sensitivity))
     if args.stage in ("all", "leakage"):
         if not args.eval_ref:
             sys.exit("--eval-ref required for the leakage stage")
@@ -425,7 +467,8 @@ def main(argv: list[str] | None = None) -> None:
             work, ref=args.eval_ref, tag="leakage",
             max_seq_id=args.eval_max_seq_id, cov=args.search_cov, threads=threads,
             chunk_seqs=args.query_chunk_seqs,
-            split_memory_limit=args.split_memory_limit))
+            split_memory_limit=args.split_memory_limit,
+            sensitivity=args.search_sensitivity))
     if args.stage in ("all", "cluster"):
         _run_stage("cluster", lambda: stage_cluster(
             work, cluster_id=args.cluster_id, cov=args.cluster_cov,

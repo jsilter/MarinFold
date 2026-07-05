@@ -68,6 +68,7 @@ REPS_PER_CLUSTER="1"
 # deletes each chunk's scratch immediately. SPLIT_MEMORY_LIMIT is an extra RAM cap.
 QUERY_CHUNK_SEQS="5000000"                # survivor seqs per novelty/leakage chunk
 SPLIT_MEMORY_LIMIT="180G"                 # cap mmseqs RAM (leaves ~76 GB on the 256 GB box for OS + id-sets)
+SEARCH_SENSITIVITY=""                     # mmseqs -s (empty = 5.7 default); lower (e.g. 4.0) = faster, less sensitive
 
 # --- mid-scale test run (validate scaling before a full run) ------------------
 TEST_LIMIT="40000000"                     # ~40M rows (~20x the smoke, ~3M survivors)
@@ -180,6 +181,7 @@ launch() {  # $1 = output prefix, remaining args appended to run_aws.py
     --cluster-id "$CLUSTER_ID" --reps-per-cluster "$REPS_PER_CLUSTER" \
     --query-chunk-seqs "$QUERY_CHUNK_SEQS" \
     ${SPLIT_MEMORY_LIMIT:+--split-memory-limit "$SPLIT_MEMORY_LIMIT"} \
+    ${SEARCH_SENSITIVITY:+--search-sensitivity "$SEARCH_SENSITIVITY"} \
     --compute-plddt-std --watch "$@"
 }
 

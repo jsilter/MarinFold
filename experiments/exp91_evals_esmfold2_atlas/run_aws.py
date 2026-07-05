@@ -151,6 +151,8 @@ def build_pipeline_args(args: argparse.Namespace) -> str:
     parts += ["--query-chunk-seqs", args.query_chunk_seqs]
     if args.split_memory_limit:
         parts += ["--split-memory-limit", args.split_memory_limit]
+    if args.search_sensitivity:
+        parts += ["--search-sensitivity", args.search_sensitivity]
     return " ".join(str(p) for p in parts)
 
 
@@ -295,6 +297,8 @@ def main(argv: list[str] | None = None) -> None:
                     help="novelty/leakage query-chunk size (bounds mmseqs RAM+disk)")
     ap.add_argument("--split-memory-limit", default=None,
                     help="mmseqs --split-memory-limit (e.g. 100G); extra RAM cap")
+    ap.add_argument("--search-sensitivity", default=None,
+                    help="mmseqs -s for novelty/leakage (default 5.7)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print user-data + config; touch nothing")
     args = ap.parse_args(argv)
