@@ -23,7 +23,9 @@ set -euo pipefail
 BUCKET="marinfold-exp91-usw2"             # S3 bucket you own in us-west-2 (name must start "marinfold")
 REGION="us-west-2"
 IAM_PROFILE="marinfold-exp91-instance-profile"   # EC2 instance profile wrapping role marinfold-exp91-instance-role
-INSTANCE_TYPE="r7i.24xlarge"              # 96 vCPU / 768 GB: headroom for the ~150 GB scan-meta peak + linclust
+INSTANCE_TYPE="r7i.8xlarge"               # 32 vCPU / 256 GB: peak RAM now ~60-100 GB (scan meta is streamed,
+                                          #   novelty search is chunked); ~3x cheaper than the old 24xlarge.
+                                          #   Confirm against the `test` run's per-stage RAM-avail logs.
 SMOKE_LIMIT="2000000"                     # rows scanned in the smoke run
 VOLUME_GB="2000"                          # root EBS: full-scale .m8 + linclust scratch (~1-2 TB)
 SMOKE_VOLUME_GB="300"                     # smoke doesn't need the big scratch volume
@@ -65,11 +67,11 @@ REPS_PER_CLUSTER="1"
 # past RAM+disk. pipeline.py now searches the query set in chunks of this size and
 # deletes each chunk's scratch immediately. SPLIT_MEMORY_LIMIT is an extra RAM cap.
 QUERY_CHUNK_SEQS="5000000"                # survivor seqs per novelty/leakage chunk
-SPLIT_MEMORY_LIMIT=""                     # e.g. 100G; empty = mmseqs auto
+SPLIT_MEMORY_LIMIT="180G"                 # cap mmseqs RAM (leaves ~76 GB on the 256 GB box for OS + id-sets)
 
 # --- mid-scale test run (validate scaling before a full run) ------------------
 TEST_LIMIT="40000000"                     # ~40M rows (~20x the smoke, ~3M survivors)
-TEST_INSTANCE_TYPE="r7i.8xlarge"          # smaller box; test doesn't need 768 GB
+TEST_INSTANCE_TYPE="r7i.8xlarge"          # same box class as the full run; test just scans fewer rows
 TEST_VOLUME_GB="600"
 
 # --- local-smoke knobs --------------------------------------------------------
