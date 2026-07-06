@@ -15,8 +15,9 @@ remaining `materialize.py` step (multi-TB, see "What remains").
 ## The run
 
 - Instance: `i-073c8a0b3fa1a592f` (r7i.24xlarge, 96 vCPU / 768 GB, us-west-2),
-  launched 2026-07-05 19:50 UTC, pipeline `_DONE` 2026-07-06 10:57 UTC.
-- Funnel wall-time ~15.1h; run cost ~$95. Self-terminates after the final upload.
+  launched 2026-07-05 19:50 UTC, pipeline `_DONE` 2026-07-06 10:57 UTC,
+  **self-terminated ~12:00 UTC** after the finish upload (billing stopped, fleet empty).
+- Funnel wall-time ~15.1h; run cost ~$95.
 - Third attempt: the first two runs OOM-wedged (see "Failures & fixes"). This one
   used the readahead-capped scan + chunked novelty + per-chunk S3 checkpointing.
 
@@ -33,8 +34,10 @@ remaining `materialize.py` step (multi-TB, see "What remains").
 ## What we have now (`s3://marinfold-exp91-usw2/exp91/out/`)
 
 Durable — no bucket lifecycle/expiry policy, versioning off; persists until
-explicitly deleted. ~$4/month in S3 Standard. **The structures are NOT here** (they
-remain as encoded `structure_blob` in the Atlas Lance dataset).
+explicitly deleted. Final total **185 objects / 312 GB** (~$7/month in S3 Standard;
+most of it the intermediate `survivors_0_*.fasta` shards — the deliverables, manifest
++ `clu_rep_seq.fasta`, are ~27 GB). **The structures are NOT here** (they remain as
+encoded `structure_blob` in the Atlas Lance dataset).
 
 | Object | Size | Contents |
 |---|---|---|
