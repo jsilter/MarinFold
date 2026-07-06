@@ -128,8 +128,16 @@ def _scan_range(spec: dict) -> tuple[int, int]:
         meta_rows.clear()
 
     ds = atlas_io.open_folds()
+    # Cap Lance's S3 read-ahead. The defaults (batch_readahead~16,
+    # fragment_readahead~4) buffer many in-flight batches per worker, and each
+    # batch drags the heavy `per_residue_plddt` binary column when
+    # --compute-plddt-std is set. Unbounded across N workers this marches
+    # MemAvailable to zero and OOM-wedges the box (observed with 64 workers on a
+    # 768 GB r7i.24xlarge). Low readahead bounds per-worker RAM; the loop is
+    # decode-bound, not fetch-bound, so throughput is barely affected.
     scanner = ds.scanner(columns=cols, offset=start, limit=stop - start,
-                         batch_size=spec["batch_rows"])
+                         batch_size=spec["batch_rows"],
+                         batch_readahead=4, fragment_readahead=2)
     n_seen = n_kept = 0
     with open(fasta_path, "w") as fasta:
         for batch in scanner.to_batches():

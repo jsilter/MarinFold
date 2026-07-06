@@ -24,7 +24,8 @@ BUCKET="marinfold-exp91-usw2"             # S3 bucket you own in us-west-2 (name
 REGION="us-west-2"
 IAM_PROFILE="marinfold-exp91-instance-profile"   # EC2 instance profile wrapping role marinfold-exp91-instance-role
 INSTANCE_TYPE="r7i.24xlarge"              # 96 vCPU / 768 GB: novelty is alignment-bound so 3x cores ~3x faster
-                                          #   (~10h vs ~30h); 768 GB holds the parallel scan's ~400 GB at 64 workers.
+                                          #   (~10h vs ~30h). Scan is capped to 32 workers + bounded Lance
+                                          #   readahead so it stays well under 768 GB (see SCAN_WORKERS).
 SMOKE_LIMIT="2000000"                     # rows scanned in the smoke run
 VOLUME_GB="2000"                          # root EBS: full-scale .m8 + linclust scratch (~1-2 TB)
 SMOKE_VOLUME_GB="300"                     # smoke doesn't need the big scratch volume
@@ -68,7 +69,10 @@ REPS_PER_CLUSTER="1"
 QUERY_CHUNK_SEQS="5000000"                # survivor seqs per novelty/leakage chunk
 SPLIT_MEMORY_LIMIT="180G"                 # cap mmseqs RAM (leaves ~76 GB on the 256 GB box for OS + id-sets)
 SEARCH_SENSITIVITY="4.0"                  # mmseqs -s (5.7 default); 4.0 = faster, may miss a few near-40%-id hits
-SCAN_WORKERS="64"                         # parallel scan procs (< 96 vCPU; ~400 GB of the 768 GB box)
+SCAN_WORKERS="32"                         # parallel scan procs. 64 OOM-wedged the 768 GB box (Lance S3
+                                          #   read-ahead x per_residue_plddt marched MemAvailable to 0);
+                                          #   pipeline.py now also caps batch/fragment readahead. 32 is the
+                                          #   safety-margin choice (scan is minutes; novelty dominates runtime).
 
 # --- mid-scale test run (validate scaling before a full run) ------------------
 TEST_LIMIT="40000000"                     # ~40M rows (~20x the smoke, ~3M survivors)
