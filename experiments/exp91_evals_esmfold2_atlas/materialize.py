@@ -66,6 +66,12 @@ SOURCE_TAG = "esm-atlas-v1"
 _CARRY_COLS = ["seq_len", "mean_plddt", "ptm", "plddt_std", "cluster_id",
                "cluster_size"]
 
+# Decode sub-batch size (stage run). Each worker holds at most this many decoded
+# mmCIFs at once, so peak RAM = _TAKE_BATCH x ~250 KB x workers, independent of
+# --chunk-size. Keeps a 64-worker pool well under the 192 GB box (the whole-chunk
+# design held ~3 GB/worker and OOM-killed it instantly on pool startup).
+_TAKE_BATCH = 2000
+
 # ---------------------------------------------------------------------------
 # Logging (mirrors pipeline.py: timestamped, flushed, with resource snapshots,
 # so the S3-shipped live log always shows where a long run actually is).
@@ -288,6 +294,14 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
     Returns ``(chunk_id, n_written, n_seq_mismatch, seconds)``. If the part already
     exists the chunk is skipped (this is the resume mechanism).
 
+    Memory is bounded to one ``_TAKE_BATCH`` of reps at a time: each sub-batch is
+    fetched (``take``), decoded, and streamed into the part via a ``ParquetWriter``
+    row group, then freed. Peak worker RAM is therefore ``_TAKE_BATCH`` decoded
+    mmCIFs (~hundreds of MB), **independent of ``--chunk-size``** — the earlier
+    "hold the whole 20k-rep chunk of decoded CIFs" design multiplied ~3 GB by the
+    worker count and instantly OOM-killed the 192 GB box the moment the 64-worker
+    pool started (analogous to the scan's uncapped-readahead wedge).
+
     Integrity check (always on, ~free): the Atlas ``sequence`` column — a field
     independent of ``structure_blob`` — is fetched alongside the blob and compared
     against the blob-decoded sequence. (The mmCIF's residues are named straight
@@ -305,38 +319,61 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
 
     t0 = time.monotonic()
     plan = pq.read_table(work / "plan" / f"chunk_{cid:05d}.parquet").to_pandas()
-    indices = plan["row_index"].to_numpy().tolist()
-    tbl = _DS.take(indices, columns=["protein_hash", "structure_blob", "sequence"])
-    got_hash = tbl.column("protein_hash").to_pylist()
-    blobs = tbl.column("structure_blob").to_pylist()
-    ref_seqs = tbl.column("sequence").to_pylist()
-
-    rows = []
-    n_mismatch = 0
-    for i in range(len(plan)):
-        h = plan["protein_hash"].iloc[i]
-        # take() preserves order, but guard against any row_index/hash drift.
-        if got_hash[i] != h:
-            _log(f"[run] WARNING chunk {cid}: hash mismatch at {i} "
-                 f"({got_hash[i]} != {h}); skipping row")
-            continue
-        cif, sequence = decode_to_cif(blobs[i], name=h[:4])
-        seq_ok = sequence == ref_seqs[i]  # blob-decoded seq vs Atlas sequence column
-        if not seq_ok:
-            n_mismatch += 1
-            _log(f"[run] WARNING chunk {cid} rep {h}: decoded sequence != Atlas "
-                 f"sequence (len {len(sequence)} vs {len(ref_seqs[i])}); seq_ok=False")
-        row = {ID_COLUMN: h, CIF_COLUMN: cif, "sequence": sequence,
-               "seq_ok": seq_ok, "source": SOURCE_TAG}
-        for c in _CARRY_COLS:
-            if c in plan.columns:
-                row[c] = plan[c].iloc[i]
-        rows.append(row)
-
     tmp = parts_dir / f".part_{cid:05d}.parquet.tmp"
-    pq.write_table(pa.Table.from_pylist(rows), tmp, compression="zstd")
+    writer = None
+    n_written = 0
+    n_mismatch = 0
+    try:
+        # Process the chunk in sub-batches so peak RAM is bounded regardless of chunk size.
+        for b0 in range(0, len(plan), _TAKE_BATCH):
+            sub = plan.iloc[b0:b0 + _TAKE_BATCH]
+            indices = sub["row_index"].to_numpy().tolist()
+            tbl = _DS.take(indices, columns=["protein_hash", "structure_blob", "sequence"])
+            got_hash = tbl.column("protein_hash").to_pylist()
+            blobs = tbl.column("structure_blob").to_pylist()
+            ref_seqs = tbl.column("sequence").to_pylist()
+
+            rows = []
+            for i in range(len(sub)):
+                h = sub["protein_hash"].iloc[i]
+                # take() preserves order, but guard against any row_index/hash drift.
+                if got_hash[i] != h:
+                    _log(f"[run] WARNING chunk {cid}: hash mismatch at {b0 + i} "
+                         f"({got_hash[i]} != {h}); skipping row")
+                    continue
+                cif, sequence = decode_to_cif(blobs[i], name=h[:4])
+                seq_ok = sequence == ref_seqs[i]  # decoded seq vs Atlas sequence column
+                if not seq_ok:
+                    n_mismatch += 1
+                    _log(f"[run] WARNING chunk {cid} rep {h}: decoded sequence != Atlas "
+                         f"sequence (len {len(sequence)} vs {len(ref_seqs[i])}); seq_ok=False")
+                row = {ID_COLUMN: h, CIF_COLUMN: cif, "sequence": sequence,
+                       "seq_ok": seq_ok, "source": SOURCE_TAG}
+                for c in _CARRY_COLS:
+                    if c in sub.columns:
+                        row[c] = sub[c].iloc[i]
+                rows.append(row)
+
+            if not rows:
+                del tbl, got_hash, blobs, ref_seqs
+                continue
+            batch_tbl = pa.Table.from_pylist(rows)
+            if writer is None:
+                writer = pq.ParquetWriter(tmp, batch_tbl.schema, compression="zstd")
+            else:
+                batch_tbl = batch_tbl.cast(writer.schema)  # keep every row group identical
+            writer.write_table(batch_tbl)
+            n_written += len(rows)
+            del tbl, got_hash, blobs, ref_seqs, rows, batch_tbl
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if writer is None:  # no rows (all hash-drifted, effectively impossible) — empty part
+        pq.write_table(pa.table({ID_COLUMN: pa.array([], pa.string())}), tmp,
+                       compression="zstd")
     os.replace(tmp, out)  # atomic: a part file only appears once fully written
-    return cid, len(rows), n_mismatch, time.monotonic() - t0
+    return cid, n_written, n_mismatch, time.monotonic() - t0
 
 
 def stage_run(work: Path, *, workers: int, skip_list: Path | None) -> None:
