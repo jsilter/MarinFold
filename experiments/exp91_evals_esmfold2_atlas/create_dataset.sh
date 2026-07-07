@@ -79,6 +79,17 @@ TEST_LIMIT="40000000"                     # ~40M rows (~20x the smoke, ~3M survi
 TEST_INSTANCE_TYPE="r7i.8xlarge"          # same box class as the full run; test just scans fewer rows
 TEST_VOLUME_GB="600"
 
+# --- materialize (stage 3: decode selected reps' structures) ------------------
+# Reads only the ~1.65 TB of blobs we need (Lance take), decodes to mmCIF, writes
+# ~3.2 TB of parquet parts streamed to S3 (each part is a resume checkpoint). RAM
+# is NOT the constraint here (per-worker ~1.5 GB), so a cheaper compute-optimized
+# box beats the funnel's big-RAM r7i.
+MATERIALIZE_INSTANCE_TYPE="c7i.24xlarge"  # 96 vCPU / 192 GB; decode is CPU + S3-I/O bound
+MATERIALIZE_VOLUME_GB="4000"              # holds the full ~3.2 TB of parts locally + headroom
+CHUNK_SIZE="20000"                        # reps per plan chunk / output part (~0.9 GB/part)
+DECODE_WORKERS="64"                       # parallel decode procs (64 x ~1.5 GB fits 192 GB)
+MATERIALIZE_LIMIT="2000"                  # materialize-smoke: only this many reps
+
 # --- local-smoke knobs --------------------------------------------------------
 LOCAL_SMOKE_LIMIT="50000"                 # Atlas rows scanned in the local smoke
 LOCAL_WORK="${LOCAL_WORK:-_localsmoke}"   # scratch dir (gitignored); wiped each run
@@ -90,6 +101,9 @@ STAGING="s3://${BUCKET}/exp91/staging"
 OUT="s3://${BUCKET}/exp91/out"
 SMOKE_OUT="s3://${BUCKET}/exp91/smoke"
 TEST_OUT="s3://${BUCKET}/exp91/test"
+STRUCT_OUT="s3://${BUCKET}/exp91/structures"          # materialized structure parquet parts
+STRUCT_SMOKE_OUT="s3://${BUCKET}/exp91/structures_smoke"
+MANIFEST_S3="${OUT}/selected_manifest.csv"            # produced by the funnel 'run'
 AFDB_REF_S3="s3://${BUCKET}/refs/afdb_ref.fasta"
 AFDB_LOCAL_DIR="${AFDB_LOCAL_DIR:-data/_afdb_ref}"     # local scratch (gitignored)
 AFDB_FASTA="${AFDB_LOCAL_DIR}/afdb_ref.fasta"
@@ -136,17 +150,20 @@ m = pd.read_parquet(f"{w}/work/survivors_meta.parquet").head(30).copy()
 m["cluster_id"] = m["protein_hash"]; m["cluster_size"] = 1
 m.to_csv(f"{w}/mini_manifest.csv", index=False)
 PY
-  uv run python materialize.py --manifest "$w/mini_manifest.csv" \
-    --out-dir "$w/dataset" --limit "$LOCAL_SMOKE_LIMIT"
+  uv run python materialize.py full --manifest "$w/mini_manifest.csv" \
+    --work-dir "$w/mat" --limit 30 --chunk-size 15 --workers 2 --batch-rows 5000
 
   SMOKE_DIR="$w" uv run python - <<'PY'
-import os, pandas as pd, gemmi
+import os, glob, pandas as pd, gemmi
 w = os.environ["SMOKE_DIR"]
-df = pd.read_parquet(f"{w}/dataset/atlas_distill_0.parquet")
+parts = sorted(glob.glob(f"{w}/mat/parts/part_*.parquet"))
+df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
 ok = sum(1 for c in df.cif_content if len(gemmi.read_structure_string(c)[0][0]) > 0)
-assert {"entry_id", "cif_content"} <= set(df.columns), "schema mismatch"
+assert {"entry_id", "cif_content", "seq_ok"} <= set(df.columns), "schema mismatch"
 assert ok == len(df), f"only {ok}/{len(df)} CIFs parse"
-print(f"[local-smoke] OK: {len(df)} structures, schema + all CIFs valid -> {w}/dataset/")
+assert bool(df.seq_ok.all()), f"{(~df.seq_ok).sum()} reps failed seq_ok"
+print(f"[local-smoke] OK: {len(df)} structures across {len(parts)} parts, "
+      f"schema + all CIFs valid + seq_ok all True -> {w}/mat/parts/")
 PY
 }
 
@@ -219,13 +236,50 @@ manifest() {
   echo "[manifest] saved ./selected_manifest.csv ($(wc -l < selected_manifest.csv) lines)"
 }
 
+launch_materialize() {  # $1 = output prefix, remaining args appended to run_aws.py
+  local out_prefix="$1"; shift
+  uv run python run_aws.py --task materialize \
+    --s3-staging "$STAGING" \
+    --s3-output  "$out_prefix" \
+    --manifest-uri "$MANIFEST_S3" \
+    --iam-instance-profile "$IAM_PROFILE" \
+    --region "$REGION" \
+    --instance-type "$MATERIALIZE_INSTANCE_TYPE" \
+    --volume-size-gb "$MATERIALIZE_VOLUME_GB" \
+    --chunk-size "$CHUNK_SIZE" \
+    --scan-workers "$SCAN_WORKERS" \
+    --decode-workers "$DECODE_WORKERS" \
+    ${KEY_NAME:+--key-name "$KEY_NAME"} \
+    ${SECURITY_GROUP_ID:+--security-group-id "$SECURITY_GROUP_ID"} \
+    --watch "$@"
+}
+
+materialize() {
+  echo "[materialize] decode all reps in ${MANIFEST_S3} -> ${STRUCT_OUT}"
+  launch_materialize "$STRUCT_OUT"
+  echo "[materialize] live log: aws s3 cp ${STRUCT_OUT}/pipeline.log.live -"
+  echo "[materialize] parts:    aws s3 ls ${STRUCT_OUT}/parts/"
+}
+
+materialize_smoke() {
+  # Cheap cloud validation of the materialize path: decode only MATERIALIZE_LIMIT
+  # reps on a small box, so plan + take + decode + checkpointing + self-terminate
+  # all get exercised for ~$1 before the full ~3.2 TB run. Trailing flags win.
+  echo "[materialize-smoke] ${MATERIALIZE_LIMIT} reps -> ${STRUCT_SMOKE_OUT}"
+  launch_materialize "$STRUCT_SMOKE_OUT" --limit "$MATERIALIZE_LIMIT" \
+    --instance-type r7i.2xlarge --volume-size-gb 100 --decode-workers 4
+  echo "[materialize-smoke] live log: aws s3 cp ${STRUCT_SMOKE_OUT}/pipeline.log.live -"
+}
+
 case "${1:-}" in
-  local-smoke) local_smoke ;;
-  prep-ref)    prep_ref ;;
-  smoke)       smoke ;;
-  test)        test-run ;;
-  run)         run ;;
-  manifest)    manifest ;;
-  all)         prep_ref; run; manifest ;;
-  *) echo "usage: $0 {local-smoke|prep-ref|smoke|test|run|manifest|all}" >&2; exit 2 ;;
+  local-smoke)       local_smoke ;;
+  prep-ref)          prep_ref ;;
+  smoke)             smoke ;;
+  test)              test-run ;;
+  run)               run ;;
+  manifest)          manifest ;;
+  materialize)       materialize ;;
+  materialize-smoke) materialize_smoke ;;
+  all)               prep_ref; run; manifest ;;
+  *) echo "usage: $0 {local-smoke|prep-ref|smoke|test|run|manifest|materialize|materialize-smoke|all}" >&2; exit 2 ;;
 esac

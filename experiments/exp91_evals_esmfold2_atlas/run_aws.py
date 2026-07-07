@@ -142,6 +142,83 @@ touch /opt/work/_pipeline_ok
 """
 
 
+# Materialize (stage 3): decode the selected reps' structures. Same fire-and-forget
+# safety as the funnel, but (a) output is ~3.2 TB of parquet parts streamed to S3 as
+# they are written (each part IS a checkpoint), and (b) the finish trap uses
+# `aws s3 sync` — never `cp --recursive` — so it does not re-upload terabytes the
+# heartbeat already pushed. Resume: a relaunch pulls the (small) plan/ back and
+# builds a skip-list of already-uploaded parts, so decode continues where it stopped.
+MATERIALIZE_USER_DATA_TMPL = r"""#!/bin/bash
+exec > /var/log/marinfold-pipeline.log 2>&1
+shutdown -h +2880 "marinfold-exp91 48h safety cap" || true
+finish() {{
+  rc=$?
+  trap - EXIT INT TERM
+  aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log 2>/dev/null || true
+  if [ -f /opt/work/_pipeline_ok ]; then echo ok | aws s3 cp - {output}/_DONE 2>/dev/null || true
+  else echo "rc=$rc" | aws s3 cp - {output}/_FAILED 2>/dev/null || true; fi
+  # sync (not cp --recursive): parts the heartbeat already pushed are skipped, so
+  # this only flushes stragglers instead of re-uploading the whole multi-TB output.
+  aws s3 sync /opt/work {output}/ --exclude "_tmp*" 2>/dev/null || true
+  shutdown -c 2>/dev/null || true
+  shutdown -h now
+}}
+trap finish EXIT INT TERM
+
+set -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y python3-pip awscli
+pip3 install --quiet pylance pyarrow pandas numpy gemmi msgpack msgpack-numpy \
+    brotli zstandard
+
+mkdir -p /opt/exp91 && cd /opt/exp91
+aws s3 cp {staging}/scripts.tar.gz .
+tar xzf scripts.tar.gz
+aws s3 cp {manifest_uri} selected_manifest.csv
+
+# Heartbeat: stream the live log + finished parts (the checkpoints) + the plan to
+# S3 every 2 min, so a crash loses at most the in-flight chunks and the run is
+# observable mid-flight.
+mkdir -p /opt/work/parts /opt/work/plan
+( while true; do
+    aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log.live 2>/dev/null || true
+    aws s3 sync /opt/work/parts {output}/parts 2>/dev/null || true
+    aws s3 sync /opt/work/plan {output}/plan 2>/dev/null || true
+    sleep 120
+  done ) &
+disown || true
+
+# Resume: pull the (small) plan back and list already-uploaded parts as chunk ids to
+# skip. The plan is deterministic, so on a fresh run these are simply empty.
+aws s3 sync {output}/plan /opt/work/plan 2>/dev/null || true
+aws s3 ls {output}/parts/ 2>/dev/null | grep -oE 'part_[0-9]+\.parquet' \
+    | grep -oE '[0-9]+' > /opt/work/skip.txt || true
+
+python3 materialize.py full --manifest selected_manifest.csv --work-dir /opt/work \
+    --skip-list /opt/work/skip.txt {materialize_args}
+touch /opt/work/_pipeline_ok
+"""
+
+
+def build_materialize_args(args: argparse.Namespace) -> str:
+    """Render the materialize.py passthrough flags from the launcher args."""
+    parts = ["--chunk-size", args.chunk_size,
+             "--scan-workers", args.scan_workers,
+             "--workers", args.decode_workers]
+    if args.limit is not None:
+        parts += ["--limit", args.limit]
+    return " ".join(str(p) for p in parts)
+
+
+def render_materialize_user_data(args: argparse.Namespace) -> str:
+    return MATERIALIZE_USER_DATA_TMPL.format(
+        staging=args.s3_staging.rstrip("/"),
+        output=args.s3_output.rstrip("/"),
+        manifest_uri=args.manifest_uri,
+        materialize_args=build_materialize_args(args))
+
+
 def build_pipeline_args(args: argparse.Namespace) -> str:
     """Render the pipeline.py passthrough flags from the launcher args."""
     parts = [
@@ -227,14 +304,20 @@ def launch(args: argparse.Namespace) -> None:
     bdm = [{"DeviceName": "/dev/sda1",
             "Ebs": {"VolumeSize": args.volume_size_gb, "VolumeType": "gp3",
                     "DeleteOnTermination": True}}]
+    if args.task == "materialize":
+        user_data = render_materialize_user_data(args)
+        name_tag = "marinfold-exp91-materialize"
+    else:
+        user_data = render_user_data(args)
+        name_tag = "marinfold-exp91-funnel"
     run_kw = dict(
         ImageId=ami, InstanceType=args.instance_type, MinCount=1, MaxCount=1,
-        UserData=render_user_data(args),
+        UserData=user_data,
         IamInstanceProfile={"Name": args.iam_instance_profile},
         BlockDeviceMappings=bdm,
         InstanceInitiatedShutdownBehavior="terminate",
         TagSpecifications=[{"ResourceType": "instance",
-                            "Tags": [{"Key": "Name", "Value": "marinfold-exp91-funnel"},
+                            "Tags": [{"Key": "Name", "Value": name_tag},
                                      {"Key": "project", "Value": "MarinFold"}]}])
     if args.key_name:
         run_kw["KeyName"] = args.key_name
@@ -272,11 +355,20 @@ def _watch(s3, s3_output: str, region: str, poll_s: int = 60) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # task: funnel (scan->select) or materialize (decode selected reps to parquet)
+    ap.add_argument("--task", choices=["funnel", "materialize"], default="funnel")
     # AWS wiring
     ap.add_argument("--s3-staging", required=True, help="s3://bucket/prefix for scripts")
     ap.add_argument("--s3-output", required=True, help="s3://bucket/prefix for results")
-    ap.add_argument("--afdb-ref-uri", required=True,
-                    help="s3:// or https:// FASTA of your AFDB training sequences")
+    ap.add_argument("--afdb-ref-uri", default=None,
+                    help="funnel: s3:// or https:// FASTA of your AFDB training seqs")
+    # materialize task
+    ap.add_argument("--manifest-uri", default=None,
+                    help="materialize: s3:// selected_manifest.csv from the funnel")
+    ap.add_argument("--chunk-size", type=int, default=20_000,
+                    help="materialize: reps per plan chunk / output part")
+    ap.add_argument("--decode-workers", type=int, default=1,
+                    help="materialize: parallel decode processes (set ~vCPU count)")
     ap.add_argument("--iam-instance-profile", required=True,
                     help="instance profile name with S3 read/write on those buckets")
     ap.add_argument("--region", default="us-west-2")
@@ -313,14 +405,28 @@ def main(argv: list[str] | None = None) -> None:
                     help="print user-data + config; touch nothing")
     args = ap.parse_args(argv)
 
+    # Per-task required inputs (kept out of argparse `required` so each task only
+    # demands what it uses).
+    if args.task == "funnel" and not args.afdb_ref_uri:
+        ap.error("--afdb-ref-uri is required for --task funnel")
+    if args.task == "materialize" and not args.manifest_uri:
+        ap.error("--manifest-uri is required for --task materialize")
+
     if args.dry_run:
-        print("=== pipeline args ===")
-        print(build_pipeline_args(args))
-        print("\n=== user-data (cloud-init) ===")
-        print(render_user_data(args))
+        if args.task == "materialize":
+            print("=== materialize args ===")
+            print(build_materialize_args(args))
+            print("\n=== user-data (cloud-init) ===")
+            print(render_materialize_user_data(args))
+        else:
+            print("=== pipeline args ===")
+            print(build_pipeline_args(args))
+            print("\n=== user-data (cloud-init) ===")
+            print(render_user_data(args))
         print("=== run config ===")
-        for k in ("region", "instance_type", "volume_size_gb", "s3_staging",
-                  "s3_output", "afdb_ref_uri", "iam_instance_profile", "spot"):
+        for k in ("task", "region", "instance_type", "volume_size_gb", "s3_staging",
+                  "s3_output", "afdb_ref_uri", "manifest_uri", "iam_instance_profile",
+                  "spot"):
             print(f"  {k}: {getattr(args, k)}")
         return
 
