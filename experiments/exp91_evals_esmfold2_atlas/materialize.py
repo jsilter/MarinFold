@@ -159,15 +159,19 @@ def _plan_scan_range(spec: dict) -> tuple[int, int, str]:
         idx = np.searchsorted(hkeys, keys)
         idx = np.clip(idx, 0, len(hkeys) - 1)
         hit = hkeys[idx] == keys
+        capped = False
         for j in np.nonzero(hit)[0]:
             out_rows.append({"row_index": row + int(j), "protein_hash": hashes[j]})
             n_hit += 1
+            if stop_after is not None and n_hit >= stop_after:
+                capped = True  # stop precisely at `limit`, mid-batch (smoke)
+                break
         n_seen += len(hashes)
         row += len(hashes)
         if n_seen % (batch_rows * 20) < batch_rows:
             _log(f"[plan {tag}] seen {n_seen:,} located {n_hit:,}; {_resources(work)}")
-        if stop_after is not None and n_hit >= stop_after:
-            _log(f"[plan {tag}] hit stop_after={stop_after:,} at row {row:,}")
+        if capped:
+            _log(f"[plan {tag}] hit stop_after={stop_after:,} at row ~{row:,}")
             break
 
     if shm is not None:
@@ -196,8 +200,11 @@ def stage_plan(manifest: Path, work: Path, *, scan_workers: int, chunk_size: int
     sel = pd.read_csv(manifest, dtype={"protein_hash": str, "cluster_id": str})
     if "protein_hash" not in sel.columns:
         raise SystemExit(f"{manifest} has no 'protein_hash' column")
-    if limit is not None:
-        sel = sel.head(limit)
+    # NB: --limit does NOT subset the manifest here. The reps are scattered across
+    # the 1.1B Atlas by row position, so wanting a *specific* handful (e.g. head(N))
+    # would force a scan of nearly the whole dataset to locate them. Instead we keep
+    # the full membership set and stop the scan after locating N reps (below), which
+    # grabs the first N *encountered* in row order — dense (~6%), so ~N/0.06 rows.
     hashes = sel["protein_hash"].astype(str).to_numpy()
     _HKEYS = np.sort(_keys_for(hashes))
     _log(f"[plan] {len(hashes):,} reps wanted; membership array "
@@ -218,7 +225,6 @@ def stage_plan(manifest: Path, work: Path, *, scan_workers: int, chunk_size: int
     else:
         # Publish the membership array in shared memory so spawned (fork-unsafe
         # Lance) workers attach it read-only instead of each pickling a copy.
-        del sel
         shm = shared_memory.SharedMemory(create=True, size=_HKEYS.nbytes)
         shared = np.ndarray(_HKEYS.shape, dtype=_HKEYS.dtype, buffer=shm.buf)
         shared[:] = _HKEYS[:]
@@ -247,10 +253,9 @@ def stage_plan(manifest: Path, work: Path, *, scan_workers: int, chunk_size: int
     # contiguous Atlas range (efficient take), and split into chunk files.
     emit_tbl = pa.concat_tables([pq.read_table(e[2]) for e in emits])
     located = emit_tbl.to_pandas().drop_duplicates("protein_hash")
-    meta = pd.read_csv(manifest, dtype={"protein_hash": str, "cluster_id": str})
-    if limit is not None:
-        meta = meta.head(limit)
-    plan = located.merge(meta, on="protein_hash", how="inner").sort_values("row_index")
+    # Join the located reps' FULL protein_hash against the manifest (already loaded
+    # as `sel`), which also drops any 64-bit-truncation false positives.
+    plan = located.merge(sel, on="protein_hash", how="inner").sort_values("row_index")
     keep = ["row_index", "protein_hash"] + [c for c in _CARRY_COLS if c in plan.columns]
     plan = plan[keep].reset_index(drop=True)
 
