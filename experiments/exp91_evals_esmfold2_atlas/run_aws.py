@@ -182,7 +182,7 @@ aws s3 cp {manifest_uri} selected_manifest.csv
 # observable mid-flight.
 mkdir -p /opt/work/parts /opt/work/plan
 ( while true; do
-    aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log.live 2>/dev/null || true
+    aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline{marker_suffix}.log.live 2>/dev/null || true
     aws s3 sync /opt/work/parts {output}/parts 2>/dev/null || true
     aws s3 sync /opt/work/plan {output}/plan 2>/dev/null || true
     sleep 120

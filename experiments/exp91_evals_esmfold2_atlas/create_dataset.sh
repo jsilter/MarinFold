@@ -317,6 +317,9 @@ materialize() {
     done
     echo "[materialize] all ${n} shards launched. Done when ${n} markers exist:"
     echo "               aws s3 ls ${STRUCT_OUT}/ | grep _DONE_shard"
+    echo "[materialize] per-shard live logs: ${STRUCT_OUT}/pipeline_shard_<i>.log.live"
+    echo "[materialize] parts: aws s3 ls ${STRUCT_OUT}/parts/ | wc -l"
+    return
   fi
   echo "[materialize] live log: aws s3 cp ${STRUCT_OUT}/pipeline.log.live -"
   echo "[materialize] parts:    aws s3 ls ${STRUCT_OUT}/parts/ | wc -l"
