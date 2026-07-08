@@ -330,6 +330,29 @@ materialize() {
   echo "[materialize] parts:    aws s3 ls ${STRUCT_OUT}/parts/ | wc -l"
 }
 
+materialize_diag() {
+  # Bounded, heavily-instrumented single-box run to confirm the S3-read-timeout fix
+  # stops the wedge (2- and 4-box runs both wedged ~10 min in: CPU->1%, NetworkIn->0,
+  # workers blocked forever in ds.take with no timeout). 1 box x DECODE_WORKERS at the
+  # real load, --log-io (per-sub-batch take/decode timing) + always-on SLOW-take warns,
+  # --max-chunks so it stops after ~DIAG_MAX_CHUNKS (self-terminates). Writes REAL parts
+  # to STRUCT_OUT (they count as progress + resume); reads the existing plan there.
+  # Watch: does CPU stay up past ~15 min, do chunks complete, do SLOW takes recover?
+  local mc="${DIAG_MAX_CHUNKS:-200}"
+  echo "[materialize-diag] 1 box, ${DECODE_WORKERS} workers, take_batch ${TAKE_BATCH}, --log-io, max ${mc} chunks -> ${STRUCT_OUT}"
+  uv run python run_aws.py --task materialize \
+    --s3-staging "$STAGING" --s3-output "$STRUCT_OUT" --manifest-uri "$MANIFEST_S3" \
+    --iam-instance-profile "$IAM_PROFILE" --region "$REGION" \
+    --instance-type "$MATERIALIZE_INSTANCE_TYPE" --volume-size-gb 300 \
+    --chunk-size "$CHUNK_SIZE" --scan-workers "$SCAN_WORKERS" \
+    --decode-workers "$DECODE_WORKERS" --take-batch "$TAKE_BATCH" \
+    --mat-max-chunks "$mc" --log-io \
+    ${KEY_NAME:+--key-name "$KEY_NAME"} \
+    ${SECURITY_GROUP_ID:+--security-group-id "$SECURITY_GROUP_ID"}
+  echo "[materialize-diag] live log: aws s3 cp ${STRUCT_OUT}/pipeline.log.live -"
+  echo "[materialize-diag] watch SLOW takes: ... | grep -E 'SLOW take|chunk [0-9]{5}:'"
+}
+
 materialize_smoke() {
   # Cheap cloud validation of the materialize path: decode only MATERIALIZE_LIMIT
   # reps on a small box, so plan + take + decode + checkpointing + self-terminate
@@ -349,7 +372,8 @@ case "${1:-}" in
   manifest)          manifest ;;
   materialize)       materialize ;;
   materialize-smoke) materialize_smoke ;;
+  materialize-diag)  materialize_diag ;;
   probe)             probe ;;
   all)               prep_ref; run; manifest ;;
-  *) echo "usage: $0 {local-smoke|prep-ref|smoke|test|run|manifest|materialize|materialize-smoke|probe|all}" >&2; exit 2 ;;
+  *) echo "usage: $0 {local-smoke|prep-ref|smoke|test|run|manifest|materialize|materialize-smoke|materialize-diag|probe|all}" >&2; exit 2 ;;
 esac
