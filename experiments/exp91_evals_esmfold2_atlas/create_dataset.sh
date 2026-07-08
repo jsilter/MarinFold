@@ -86,8 +86,10 @@ TEST_VOLUME_GB="600"
 # box beats the funnel's big-RAM r7i.
 MATERIALIZE_INSTANCE_TYPE="c7i.24xlarge"  # 96 vCPU / 192 GB; decode is CPU + S3-I/O bound
 MATERIALIZE_VOLUME_GB="4000"              # holds the full ~3.2 TB of parts locally + headroom
-CHUNK_SIZE="10000"                        # reps per plan chunk / output part; smaller = more
-                                          # frequent checkpoints + smaller intra-chunk memory window
+CHUNK_SIZE="20000"                        # reps per plan chunk / output part; matches the plan
+                                          # already in S3. Memory is bounded by _release_memory()
+                                          # per sub-batch + 64 workers (diagnostic: RAM floor ~48 GB
+                                          # even at 20k), so smaller chunks are not needed for safety.
 # Decode is S3-read-latency bound (a local probe: ~6 ms/structure decode vs ~200 ms
 # take), so the 96 vCPUs sit ~97% idle waiting on S3 -> throughput scales with the
 # number of concurrent workers, capped by RAM (each take buffers ~GBs of Lance pages).
