@@ -154,12 +154,12 @@ shutdown -h +2880 "marinfold-exp91 48h safety cap" || true
 finish() {{
   rc=$?
   trap - EXIT INT TERM
-  aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline.log 2>/dev/null || true
-  if [ -f /opt/work/_pipeline_ok ]; then echo ok | aws s3 cp - {output}/_DONE 2>/dev/null || true
-  else echo "rc=$rc" | aws s3 cp - {output}/_FAILED 2>/dev/null || true; fi
+  aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline{marker_suffix}.log 2>/dev/null || true
+  if [ -f /opt/work/_pipeline_ok ]; then echo ok | aws s3 cp - {output}/_DONE{marker_suffix} 2>/dev/null || true
+  else echo "rc=$rc" | aws s3 cp - {output}/_FAILED{marker_suffix} 2>/dev/null || true; fi
   # sync (not cp --recursive): parts the heartbeat already pushed are skipped, so
   # this only flushes stragglers instead of re-uploading the whole multi-TB output.
-  aws s3 sync /opt/work {output}/ --exclude "_tmp*" 2>/dev/null || true
+  aws s3 sync /opt/work/parts {output}/parts 2>/dev/null || true
   shutdown -c 2>/dev/null || true
   shutdown -h now
 }}
@@ -216,10 +216,15 @@ def build_materialize_args(args: argparse.Namespace) -> str:
 
 
 def render_materialize_user_data(args: argparse.Namespace) -> str:
+    # Per-shard done/failed markers so a sharded run's completion is unambiguous: with
+    # N boxes all writing one parts/ prefix, a single _DONE would be written N times and
+    # can't tell you all shards finished. Single-box (num_shards=1) keeps the bare _DONE.
+    marker_suffix = "" if args.mat_num_shards <= 1 else f"_shard_{args.mat_shard_id}"
     return MATERIALIZE_USER_DATA_TMPL.format(
         staging=args.s3_staging.rstrip("/"),
         output=args.s3_output.rstrip("/"),
         manifest_uri=args.manifest_uri,
+        marker_suffix=marker_suffix,
         materialize_args=build_materialize_args(args))
 
 

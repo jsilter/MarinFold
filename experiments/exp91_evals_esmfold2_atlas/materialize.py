@@ -30,14 +30,19 @@ Two stages, both resumable and heavily logged (the lessons from the funnel runs)
 Smoke test: ``--limit N`` caps the plan to the first N reps it locates and stops the
 scan early, so ``full --limit 500`` finishes in seconds end to end.
 
-Output parquet columns (per rep):
-  entry_id        protein_hash (the afdb-24M id column)
+Output parquet columns (per rep). Names align with timodonnell/afdb-24M where we have
+the field (entry_id, cif_content, seq_len, global_plddt, seq_cluster_id, split) so the
+two datasets union cleanly; the rest are Atlas-specific extras:
+  entry_id        protein_hash (afdb-24M id column)
   cif_content     decoded mmCIF text (per-residue pLDDT in the B-factor column)
-  sequence        residue sequence (from the decoded structure)
-  seq_ok          bool: decoded sequence == the Atlas ``sequence`` column (cheap
-                  always-on integrity check; downstream can filter on it)
-  seq_len, mean_plddt, ptm, plddt_std, cluster_id, cluster_size   (from the manifest)
-  source          constant "esm-atlas-v1" provenance tag
+  seq_len         residue count (afdb-24M)
+  global_plddt    mean pLDDT 0-1 (afdb-24M name; renamed from the Atlas mean_plddt)
+  seq_cluster_id  our linclust @40%-id cluster (afdb-24M name; renamed from cluster_id)
+  split           constant "train" (afdb-24M name)
+  sequence        residue sequence (from the decoded structure) [extra]
+  seq_ok          bool: decoded sequence == Atlas ``sequence`` column (integrity) [extra]
+  ptm, plddt_std, cluster_size   from the manifest [extra]
+  source          constant "esm-atlas-v1" provenance tag [extra]
 
 Publishing the result to HuggingFace is a **separate, sign-off-gated** step
 (cross-cloud, >10 GB, CC BY-SA) — this script never does it.
@@ -65,6 +70,14 @@ CIF_COLUMN = "cif_content"
 SOURCE_TAG = "esm-atlas-v1"
 _CARRY_COLS = ["seq_len", "mean_plddt", "ptm", "plddt_std", "cluster_id",
                "cluster_size"]
+# Rename carried manifest columns to the timodonnell/afdb-24M column names so the two
+# datasets union cleanly (entry_id/cif_content/seq_len already match). Our clustering is
+# by sequence (linclust @ 40% id), so cluster_id maps to afdb's seq_cluster_id. The
+# afdb-only columns (uniprot_accession, tax_id, organism_name, struct_cluster_id,
+# gcs_uri) are meaningless for metagenomic Atlas predictions and are not fabricated;
+# our extra columns (sequence, seq_ok, ptm, plddt_std, cluster_size, source) are kept.
+_AFDB_RENAME = {"mean_plddt": "global_plddt", "cluster_id": "seq_cluster_id"}
+_SPLIT_TAG = "train"  # afdb-24M 'split' column; all distilled reps are training data
 
 # Decode sub-batch size (stage run). Each worker holds at most this many decoded
 # mmCIFs at once, so peak RAM = _TAKE_BATCH x ~250 KB x workers, independent of
@@ -349,10 +362,10 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
                     _log(f"[run] WARNING chunk {cid} rep {h}: decoded sequence != Atlas "
                          f"sequence (len {len(sequence)} vs {len(ref_seqs[i])}); seq_ok=False")
                 row = {ID_COLUMN: h, CIF_COLUMN: cif, "sequence": sequence,
-                       "seq_ok": seq_ok, "source": SOURCE_TAG}
+                       "seq_ok": seq_ok, "split": _SPLIT_TAG, "source": SOURCE_TAG}
                 for c in _CARRY_COLS:
                     if c in sub.columns:
-                        row[c] = sub[c].iloc[i]
+                        row[_AFDB_RENAME.get(c, c)] = sub[c].iloc[i]
                 rows.append(row)
 
             if not rows:

@@ -92,8 +92,13 @@ CHUNK_SIZE="20000"                        # reps per plan chunk / output part (~
 # number of concurrent workers, capped by RAM (each take buffers ~GBs of Lance pages).
 # TAKE_BATCH is small so many workers fit; DECODE_WORKERS oversubscribes the vCPUs.
 # The `probe` target measures the sweet spot before a full run.
-DECODE_WORKERS="192"                      # oversubscribe 96 vCPU (I/O-bound; CPUs idle)
-TAKE_BATCH="384"                          # reps per take/decode sub-batch (bounds worker RAM)
+# Probe (i-0e27544233032e562, c7i.24xlarge) measured take_batch=256 @ workers: 96->2697/s
+# (129 GB RAM free), 160->1684/s, 224->1206/s. One box saturates its S3/network bandwidth
+# at ~96 workers (~2700/s, ~7h, safe RAM); more workers only add contention. Go faster by
+# sharding across boxes (MAT_NUM_SHARDS), not by raising DECODE_WORKERS.
+DECODE_WORKERS="96"                       # per-box concurrency sweet spot (bandwidth-bound)
+TAKE_BATCH="256"                          # dense sorted window -> ~9x less page-read waste than 2000
+MAT_NUM_SHARDS="${MAT_NUM_SHARDS:-1}"     # boxes to fan chunks across (1 = single box, ~7h)
 MATERIALIZE_LIMIT="2000"                  # materialize-smoke: only this many reps
 # --- probe (throughput sweep) knobs -------------------------------------------
 PROBE_WORKERS="${PROBE_WORKERS:-96 160 224 288}"  # worker counts to sweep
@@ -169,7 +174,12 @@ w = os.environ["SMOKE_DIR"]
 parts = sorted(glob.glob(f"{w}/mat/parts/part_*.parquet"))
 df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
 ok = sum(1 for c in df.cif_content if len(gemmi.read_structure_string(c)[0][0]) > 0)
-assert {"entry_id", "cif_content", "seq_ok"} <= set(df.columns), "schema mismatch"
+# afdb-24M-aligned names (entry_id/cif_content/seq_len/global_plddt/seq_cluster_id/split)
+# plus our extras must all be present.
+need = {"entry_id", "cif_content", "seq_len", "global_plddt", "seq_cluster_id",
+        "split", "sequence", "seq_ok", "source"}
+assert need <= set(df.columns), f"schema mismatch: missing {need - set(df.columns)}"
+assert (df.split == "train").all(), "split should be constant 'train'"
 assert ok == len(df), f"only {ok}/{len(df)} CIFs parse"
 assert bool(df.seq_ok.all()), f"{(~df.seq_ok).sum()} reps failed seq_ok"
 print(f"[local-smoke] OK: {len(df)} structures across {len(parts)} parts, "
@@ -262,7 +272,7 @@ launch_materialize() {  # $1 = output prefix, remaining args appended to run_aws
     --take-batch "$TAKE_BATCH" \
     ${KEY_NAME:+--key-name "$KEY_NAME"} \
     ${SECURITY_GROUP_ID:+--security-group-id "$SECURITY_GROUP_ID"} \
-    --watch "$@"
+    "$@"
 }
 
 probe() {
@@ -287,10 +297,28 @@ probe() {
 }
 
 materialize() {
-  echo "[materialize] decode all reps in ${MANIFEST_S3} -> ${STRUCT_OUT}"
-  launch_materialize "$STRUCT_OUT"
+  local n="$MAT_NUM_SHARDS"
+  if [ "$n" -le 1 ]; then
+    echo "[materialize] decode all reps in ${MANIFEST_S3} -> ${STRUCT_OUT} (1 box, ~7h)"
+    launch_materialize "$STRUCT_OUT" --watch
+  else
+    # Shard the 3,338 plan chunks across N boxes (chunk_id %% N). Each box owns a
+    # disjoint chunk set, writes non-colliding part_*.parquet into the SAME parts/
+    # prefix, and self-terminates writing _DONE_shard_<i>. No --watch (can't watch N);
+    # monitor with: aws s3 ls ${STRUCT_OUT}/ | grep _DONE_shard. Per-box EBS only needs
+    # ~3.2 TB / N of local part storage. A failed shard is a resumable relaunch of that id.
+    local vol=$(( 3200 / n + 400 ))
+    echo "[materialize] sharding across ${n} boxes -> ${STRUCT_OUT} (~$(( 7 / n ))-$(( 14 / n ))h wall), ${vol} GB EBS each"
+    for i in $(seq 0 $(( n - 1 ))); do
+      echo "[materialize] launching shard ${i}/${n}"
+      launch_materialize "$STRUCT_OUT" \
+        --mat-num-shards "$n" --mat-shard-id "$i" --volume-size-gb "$vol"
+    done
+    echo "[materialize] all ${n} shards launched. Done when ${n} markers exist:"
+    echo "               aws s3 ls ${STRUCT_OUT}/ | grep _DONE_shard"
+  fi
   echo "[materialize] live log: aws s3 cp ${STRUCT_OUT}/pipeline.log.live -"
-  echo "[materialize] parts:    aws s3 ls ${STRUCT_OUT}/parts/"
+  echo "[materialize] parts:    aws s3 ls ${STRUCT_OUT}/parts/ | wc -l"
 }
 
 materialize_smoke() {
