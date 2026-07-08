@@ -92,12 +92,13 @@ CHUNK_SIZE="20000"                        # reps per plan chunk / output part (~
 # number of concurrent workers, capped by RAM (each take buffers ~GBs of Lance pages).
 # TAKE_BATCH is small so many workers fit; DECODE_WORKERS oversubscribes the vCPUs.
 # The `probe` target measures the sweet spot before a full run.
-# Probe (i-0e27544233032e562, c7i.24xlarge) measured take_batch=256 @ workers: 96->2697/s
-# (129 GB RAM free), 160->1684/s, 224->1206/s. One box saturates its S3/network bandwidth
-# at ~96 workers (~2700/s, ~7h, safe RAM); more workers only add contention. Go faster by
-# sharding across boxes (MAT_NUM_SHARDS), not by raising DECODE_WORKERS.
+# Probe (i-0e27544233032e562, c7i.24xlarge) @96 workers: take_batch 512->3005/s (126 GB RAM
+# free), 256->2697/s; both fall off past 96 workers (512: 160->1835, 224->1323; 256: 160->1684,
+# 224->1206, 288->960). One box saturates its S3/network bandwidth at ~96 workers (~3000/s,
+# ~6.2h, safe RAM); more workers only add contention. Go faster by sharding across boxes
+# (MAT_NUM_SHARDS), not by raising DECODE_WORKERS.
 DECODE_WORKERS="96"                       # per-box concurrency sweet spot (bandwidth-bound)
-TAKE_BATCH="256"                          # dense sorted window -> ~9x less page-read waste than 2000
+TAKE_BATCH="512"                          # dense sorted window -> far less page-read waste than 2000
 MAT_NUM_SHARDS="${MAT_NUM_SHARDS:-1}"     # boxes to fan chunks across (1 = single box, ~7h)
 MATERIALIZE_LIMIT="2000"                  # materialize-smoke: only this many reps
 # --- probe (throughput sweep) knobs -------------------------------------------
