@@ -100,6 +100,7 @@ CHUNK_SIZE="20000"                        # reps per plan chunk / output part (~
 DECODE_WORKERS="96"                       # per-box concurrency sweet spot (bandwidth-bound)
 TAKE_BATCH="512"                          # dense sorted window -> far less page-read waste than 2000
 MAT_NUM_SHARDS="${MAT_NUM_SHARDS:-1}"     # boxes to fan chunks across (1 = single box, ~7h)
+MAT_STAGGER_SECONDS="${MAT_STAGGER_SECONDS:-90}"  # gap between shard launches (desync waves)
 MATERIALIZE_LIMIT="2000"                  # materialize-smoke: only this many reps
 # --- probe (throughput sweep) knobs -------------------------------------------
 PROBE_WORKERS="${PROBE_WORKERS:-96 160 224 288}"  # worker counts to sweep
@@ -314,6 +315,10 @@ materialize() {
       echo "[materialize] launching shard ${i}/${n}"
       launch_materialize "$STRUCT_OUT" \
         --mat-num-shards "$n" --mat-shard-id "$i" --volume-size-gb "$vol"
+      # Stagger starts so the boxes do not all hit S3 (and finish their equal-size
+      # chunks) in lockstep -- desynchronizes the read + heartbeat-sync waves. Steady
+      # -state concurrency is unchanged; this only smooths the transients.
+      if [ "$i" -lt $(( n - 1 )) ]; then sleep "$MAT_STAGGER_SECONDS"; fi
     done
     echo "[materialize] all ${n} shards launched. Done when ${n} markers exist:"
     echo "               aws s3 ls ${STRUCT_OUT}/ | grep _DONE_shard"
