@@ -93,7 +93,17 @@ _T0 = time.monotonic()
 
 
 def _log(msg: str) -> None:
-    print(f"[{time.monotonic() - _T0:8.1f}s] {msg}", flush=True)
+    # Wall-clock UTC prefix so log lines correlate with S3 object mtimes and
+    # CloudWatch (CPU/NetworkIn) when diagnosing a wedge; the monotonic offset is
+    # per-process (workers reset it on spawn) so it alone can't be lined up.
+    print(f"[{time.strftime('%H:%M:%S', time.gmtime())}]"
+          f"[{time.monotonic() - _T0:7.1f}s] {msg}", flush=True)
+
+
+# A single ds.take that exceeds this is logged even without --log-io: it is the
+# early-warning signal for the S3-connection wedge (a hung take never returns, so a
+# "take START" with no matching completion pins the exact worker + sub-batch).
+SLOW_TAKE_WARN_S = 30.0
 
 
 def _mem_avail_gb() -> float:
@@ -331,8 +341,13 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
         return cid, -1, 0, 0.0  # already done (n_written=-1 signals "skipped")
 
     take_batch = spec.get("take_batch", _TAKE_BATCH)
+    log_io = spec.get("log_io", False)
+    pid = os.getpid()
     t0 = time.monotonic()
     plan = pq.read_table(work / "plan" / f"chunk_{cid:05d}.parquet").to_pandas()
+    n_sub = (len(plan) + take_batch - 1) // take_batch
+    if log_io:
+        _log(f"[run] w{pid} chunk {cid}: START {len(plan):,} reps / {n_sub} sub-batches")
     tmp = parts_dir / f".part_{cid:05d}.parquet.tmp"
     writer = None
     n_written = 0
@@ -340,9 +355,22 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
     try:
         # Process the chunk in sub-batches so peak RAM is bounded regardless of chunk size.
         for b0 in range(0, len(plan), take_batch):
+            sb = b0 // take_batch
             sub = plan.iloc[b0:b0 + take_batch]
             indices = sub["row_index"].to_numpy().tolist()
+            # Time the take: a hung S3 read is the known wedge, so log a "take START"
+            # (with --log-io) whose missing completion pins the stuck worker+sub-batch,
+            # and always warn on a take slower than SLOW_TAKE_WARN_S.
+            if log_io:
+                _log(f"[run] w{pid} chunk {cid} sb {sb}/{n_sub}: take START ({len(sub)} rows)")
+            t_take0 = time.monotonic()
             tbl = _DS.take(indices, columns=["protein_hash", "structure_blob", "sequence"])
+            t_take = time.monotonic() - t_take0
+            if t_take > SLOW_TAKE_WARN_S:
+                _log(f"[run] w{pid} chunk {cid} sb {sb}/{n_sub}: SLOW take {t_take:.1f}s "
+                     f"({len(sub)} rows)")
+            elif log_io:
+                _log(f"[run] w{pid} chunk {cid} sb {sb}/{n_sub}: take {t_take:.1f}s")
             got_hash = tbl.column("protein_hash").to_pylist()
             blobs = tbl.column("structure_blob").to_pylist()
             ref_seqs = tbl.column("sequence").to_pylist()
@@ -392,7 +420,7 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
 
 def stage_run(work: Path, *, workers: int, skip_list: Path | None,
               take_batch: int = _TAKE_BATCH, num_shards: int = 1, shard_id: int = 0,
-              max_chunks: int | None = None) -> None:
+              max_chunks: int | None = None, log_io: bool = False) -> None:
     """Decode all planned chunks into checkpointed parts (resumable).
 
     Sharding (``num_shards``/``shard_id``): each shard owns the chunks whose id is
@@ -426,7 +454,8 @@ def stage_run(work: Path, *, workers: int, skip_list: Path | None,
         _log("[run] nothing to do — all chunks materialized")
         return
 
-    specs = [{"work": str(work), "chunk_id": c, "take_batch": take_batch} for c in todo]
+    specs = [{"work": str(work), "chunk_id": c, "take_batch": take_batch,
+              "log_io": log_io} for c in todo]
     n_done = n_rows = n_mismatch = 0
     t_start = time.monotonic()
     ctx = mp.get_context("spawn")  # Lance is not fork-safe; each worker opens its own handle
@@ -475,6 +504,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--shard-id", type=int, default=0, help="this box's shard index")
     ap.add_argument("--max-chunks", type=int, default=None,
                     help="decode at most N chunks then stop (throughput probe)")
+    ap.add_argument("--log-io", action="store_true",
+                    help="log every take/decode sub-batch (per-worker) to diagnose "
+                         "an S3-read wedge; noisy, use for short diagnostic runs")
     args = ap.parse_args(argv)
     args.work_dir.mkdir(parents=True, exist_ok=True)
     if not 0 <= args.shard_id < args.num_shards:
@@ -493,7 +525,7 @@ def main(argv: list[str] | None = None) -> None:
         _log(f"=== stage run: START — {_resources(args.work_dir)}")
         stage_run(args.work_dir, workers=args.workers, skip_list=args.skip_list,
                   take_batch=args.take_batch, num_shards=args.num_shards,
-                  shard_id=args.shard_id, max_chunks=args.max_chunks)
+                  shard_id=args.shard_id, max_chunks=args.max_chunks, log_io=args.log_io)
         _log(f"=== stage run: DONE — {_resources(args.work_dir)}")
 
 

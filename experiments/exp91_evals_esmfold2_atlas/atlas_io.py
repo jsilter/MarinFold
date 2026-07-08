@@ -41,9 +41,22 @@ import numpy as np
 
 ATLAS_BUCKET = "esm-protein-atlas"
 ATLAS_REGION = "us-west-2"
-# Lance reads through object_store; this is how it does an unsigned (public)
-# S3 request. (pyarrow's S3FileSystem uses anonymous=True instead.)
-ANON_STORAGE = {"aws_skip_signature": "true", "region": ATLAS_REGION}
+# Lance reads through the Rust ``object_store`` crate; this is how it does an
+# unsigned (public) S3 request. (pyarrow's S3FileSystem uses anonymous=True.)
+#
+# ``timeout``/``connect_timeout`` are CRITICAL for the high-fan-out materialize:
+# without a per-request timeout, object_store blocks FOREVER on a dropped or
+# throttled S3 connection. Observed failure (exp91 materialize, 96 workers/box):
+# after ~8-10 min of sustained high-request-rate reads, S3 started dropping
+# connections, NetworkIn fell to ~0, and every worker wedged in ``ds.take`` with no
+# timeout to break it (CPU -> ~1%). A bounded timeout turns that hang into a
+# retriable error; object_store then retries with backoff (default max_retries).
+ANON_STORAGE = {
+    "aws_skip_signature": "true",
+    "region": ATLAS_REGION,
+    "timeout": "120s",          # per-request cap; ranged GETs are small so this is generous
+    "connect_timeout": "20s",   # cap TCP connect so a black-holed endpoint fails fast
+}
 
 FOLDS_1B_URI = f"s3://{ATLAS_BUCKET}/v1/folds/folds_1B.lance"
 FOLDS_ATLAS_URI = f"s3://{ATLAS_BUCKET}/v1/folds/folds_atlas.lance"

@@ -215,6 +215,10 @@ def build_materialize_args(args: argparse.Namespace) -> str:
         parts += ["--take-batch", args.take_batch]
     if args.mat_num_shards > 1:
         parts += ["--num-shards", args.mat_num_shards, "--shard-id", args.mat_shard_id]
+    if args.mat_max_chunks is not None:
+        parts += ["--max-chunks", args.mat_max_chunks]
+    if args.log_io:
+        parts.append("--log-io")
     if args.limit is not None:
         parts += ["--limit", args.limit]
     return " ".join(str(p) for p in parts)
@@ -448,6 +452,10 @@ def main(argv: list[str] | None = None) -> None:
                     help="materialize: split chunks across this many boxes")
     ap.add_argument("--mat-shard-id", type=int, default=0,
                     help="materialize: this box's shard index")
+    ap.add_argument("--mat-max-chunks", type=int, default=None,
+                    help="materialize: decode at most N chunks then stop (diagnostic)")
+    ap.add_argument("--log-io", action="store_true",
+                    help="materialize: per-sub-batch take/decode logging (diagnostic)")
     # probe task (throughput sweep)
     ap.add_argument("--probe-workers", type=int, nargs="+",
                     default=[64, 128, 192, 256], help="probe: worker counts to sweep")
