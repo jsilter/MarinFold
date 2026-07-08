@@ -49,6 +49,8 @@ Publishing the result to HuggingFace is a **separate, sign-off-gated** step
 """
 
 import argparse
+import ctypes
+import ctypes.util
 import json
 import multiprocessing as mp
 import os
@@ -98,6 +100,25 @@ def _log(msg: str) -> None:
     # per-process (workers reset it on spawn) so it alone can't be lined up.
     print(f"[{time.strftime('%H:%M:%S', time.gmtime())}]"
           f"[{time.monotonic() - _T0:7.1f}s] {msg}", flush=True)
+
+
+_LIBC = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=False)
+
+
+def _release_memory() -> None:
+    """Return freed memory to the OS after each decode sub-batch.
+
+    Two allocators creep independently over a chunk's sub-batches: Arrow's memory
+    pool retains freed ``take()`` buffers (the fat ``structure_blob`` reads), and
+    glibc retains the decoded-CIF ``str`` arenas. Releasing both each sub-batch keeps
+    per-worker RSS flat, so 64+ synchronized workers don't OOM-cascade the 192 GB box
+    partway through the first chunk. ``malloc_trim`` is glibc-only; guard it.
+    """
+    pa.default_memory_pool().release_unused()
+    try:
+        _LIBC.malloc_trim(0)
+    except (AttributeError, OSError):
+        pass  # non-glibc libc: Arrow release alone still bounds the bulk of the growth
 
 
 # A single ds.take that exceeds this is logged even without --log-io: it is the
@@ -368,9 +389,10 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
             t_take = time.monotonic() - t_take0
             if t_take > SLOW_TAKE_WARN_S:
                 _log(f"[run] w{pid} chunk {cid} sb {sb}/{n_sub}: SLOW take {t_take:.1f}s "
-                     f"({len(sub)} rows)")
+                     f"({len(sub)} rows); RAM avail {_mem_avail_gb():.0f} GB")
             elif log_io:
-                _log(f"[run] w{pid} chunk {cid} sb {sb}/{n_sub}: take {t_take:.1f}s")
+                _log(f"[run] w{pid} chunk {cid} sb {sb}/{n_sub}: take {t_take:.1f}s; "
+                     f"RAM avail {_mem_avail_gb():.0f} GB")
             got_hash = tbl.column("protein_hash").to_pylist()
             blobs = tbl.column("structure_blob").to_pylist()
             ref_seqs = tbl.column("sequence").to_pylist()
@@ -398,6 +420,7 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
 
             if not rows:
                 del tbl, got_hash, blobs, ref_seqs
+                _release_memory()
                 continue
             batch_tbl = pa.Table.from_pylist(rows)
             if writer is None:
@@ -407,6 +430,11 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
             writer.write_table(batch_tbl)
             n_written += len(rows)
             del tbl, got_hash, blobs, ref_seqs, rows, batch_tbl
+            # Return Arrow's retained arena memory to the OS each sub-batch. Without
+            # this the default memory pool holds freed take() buffers, so RSS creeps
+            # over a chunk's ~40 sub-batches until 96 synchronized workers OOM-cascade
+            # the 192 GB box ~halfway through the first chunk (observed).
+            _release_memory()
     finally:
         if writer is not None:
             writer.close()

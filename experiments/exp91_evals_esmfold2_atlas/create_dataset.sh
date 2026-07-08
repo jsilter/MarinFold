@@ -86,7 +86,8 @@ TEST_VOLUME_GB="600"
 # box beats the funnel's big-RAM r7i.
 MATERIALIZE_INSTANCE_TYPE="c7i.24xlarge"  # 96 vCPU / 192 GB; decode is CPU + S3-I/O bound
 MATERIALIZE_VOLUME_GB="4000"              # holds the full ~3.2 TB of parts locally + headroom
-CHUNK_SIZE="20000"                        # reps per plan chunk / output part (~0.9 GB/part)
+CHUNK_SIZE="10000"                        # reps per plan chunk / output part; smaller = more
+                                          # frequent checkpoints + smaller intra-chunk memory window
 # Decode is S3-read-latency bound (a local probe: ~6 ms/structure decode vs ~200 ms
 # take), so the 96 vCPUs sit ~97% idle waiting on S3 -> throughput scales with the
 # number of concurrent workers, capped by RAM (each take buffers ~GBs of Lance pages).
@@ -97,7 +98,10 @@ CHUNK_SIZE="20000"                        # reps per plan chunk / output part (~
 # 224->1206, 288->960). One box saturates its S3/network bandwidth at ~96 workers (~3000/s,
 # ~6.2h, safe RAM); more workers only add contention. Go faster by sharding across boxes
 # (MAT_NUM_SHARDS), not by raising DECODE_WORKERS.
-DECODE_WORKERS="96"                       # per-box concurrency sweet spot (bandwidth-bound)
+# 96 workers OOM-cascaded the 192 GB box ~halfway through the first chunk (Arrow/glibc
+# memory creep x 96 synchronized workers). 64 completed parts cleanly in attempt 2, so
+# 64 is the proven-safe count; combined with per-sub-batch _release_memory() + 10k chunks.
+DECODE_WORKERS="64"                       # proven safe (attempt 2); 96 OOMs over sustained runs
 TAKE_BATCH="512"                          # dense sorted window -> far less page-read waste than 2000
 MAT_NUM_SHARDS="${MAT_NUM_SHARDS:-1}"     # boxes to fan chunks across (1 = single box, ~7h)
 MAT_STAGGER_SECONDS="${MAT_STAGGER_SECONDS:-90}"  # gap between shard launches (desync waves)
