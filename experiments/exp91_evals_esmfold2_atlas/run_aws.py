@@ -159,7 +159,8 @@ finish() {{
   else echo "rc=$rc" | aws s3 cp - {output}/_FAILED{marker_suffix} 2>/dev/null || true; fi
   # sync (not cp --recursive): parts the heartbeat already pushed are skipped, so
   # this only flushes stragglers instead of re-uploading the whole multi-TB output.
-  aws s3 sync /opt/work/parts {output}/parts 2>/dev/null || true
+  # Exclude in-progress .tmp: only completed part_*.parquet are real checkpoints.
+  aws s3 sync /opt/work/parts {output}/parts --exclude "*.tmp" 2>/dev/null || true
   shutdown -c 2>/dev/null || true
   shutdown -h now
 }}
@@ -177,22 +178,26 @@ aws s3 cp {staging}/scripts.tar.gz .
 tar xzf scripts.tar.gz
 aws s3 cp {manifest_uri} selected_manifest.csv
 
-# Heartbeat: stream the live log + finished parts (the checkpoints) + the plan to
-# S3 every 2 min, so a crash loses at most the in-flight chunks and the run is
-# observable mid-flight.
+# Heartbeat: stream the live log + finished parts (the checkpoints) to S3 every 2 min,
+# so a crash loses at most the in-flight chunks and the run is observable mid-flight.
+# ONLY completed part_*.parquet are synced (--exclude "*.tmp"): the atomic-write temp
+# files are large, grow for the whole chunk, and re-uploading them every cycle wasted
+# bandwidth and starved the decode workers. The plan already lives in S3 (pulled below),
+# so it is never synced back up.
 mkdir -p /opt/work/parts /opt/work/plan
 ( while true; do
     aws s3 cp /var/log/marinfold-pipeline.log {output}/pipeline{marker_suffix}.log.live 2>/dev/null || true
-    aws s3 sync /opt/work/parts {output}/parts 2>/dev/null || true
-    aws s3 sync /opt/work/plan {output}/plan 2>/dev/null || true
+    aws s3 sync /opt/work/parts {output}/parts --exclude "*.tmp" 2>/dev/null || true
     sleep 120
   done ) &
 disown || true
 
-# Resume: pull the (small) plan back and list already-uploaded parts as chunk ids to
-# skip. The plan is deterministic, so on a fresh run these are simply empty.
+# Resume: pull the (small) plan back and list already-COMPLETED parts as chunk ids to
+# skip. The `$` anchor matches only final part_NNNNN.parquet, never a partial
+# .part_NNNNN.parquet.tmp (which contains the same substring), so a partial is never
+# mistaken for done. The plan is deterministic, so on a fresh run these are simply empty.
 aws s3 sync {output}/plan /opt/work/plan 2>/dev/null || true
-aws s3 ls {output}/parts/ 2>/dev/null | grep -oE 'part_[0-9]+\.parquet' \
+aws s3 ls {output}/parts/ 2>/dev/null | grep -oE 'part_[0-9]+\.parquet$' \
     | grep -oE '[0-9]+' > /opt/work/skip.txt || true
 
 python3 materialize.py full --manifest selected_manifest.csv --work-dir /opt/work \
