@@ -487,7 +487,12 @@ def stage_run(work: Path, *, workers: int, skip_list: Path | None,
     n_done = n_rows = n_mismatch = 0
     t_start = time.monotonic()
     ctx = mp.get_context("spawn")  # Lance is not fork-safe; each worker opens its own handle
-    with ctx.Pool(workers, initializer=_worker_init) as pool:
+    # maxtasksperchild=1: recycle each worker after ONE chunk so no per-process memory
+    # accumulates across chunks. The diagnostic showed RAM stepping from ~55 GB avail
+    # (workers' 1st chunk) down to ~25 GB (2nd chunk) — cross-chunk creep that would
+    # OOM over the full run's ~26 chunks/worker. A fresh process per chunk resets it to
+    # the safe single-chunk level; reopening Lance per ~5-min chunk is ~1% overhead.
+    with ctx.Pool(workers, initializer=_worker_init, maxtasksperchild=1) as pool:
         for cid, written, mism, secs in pool.imap_unordered(_materialize_chunk, specs):
             n_done += 1
             if written >= 0:
