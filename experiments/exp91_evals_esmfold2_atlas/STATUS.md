@@ -1,4 +1,4 @@
-# exp91 distillation run — status (2026-07-06)
+# exp91 distillation run — status (2026-07-08)
 
 Status of the ESM Atlas (ESMFold2 Atlas, 1.1B predicted monomers) distillation
 run that produces a quality-filtered, novel, de-duplicated subset to augment the
@@ -7,10 +7,13 @@ afdb-24M training set. For the *why* (characterization, funnel design) see
 
 ## TL;DR
 
-The full funnel **completed successfully** on 2026-07-06. We now have, for
-**66,759,963 representative proteins**, their **sequences + selection metadata**
-in S3. We do **not** yet have their **3D structures** — decoding those is the
-remaining `materialize.py` step (multi-TB, see "What remains").
+**COMPLETE.** The full funnel completed 2026-07-06 and the **materialize** step
+(decode each rep's `structure_blob` → mmCIF parquet) completed **2026-07-08**. We
+now have, for all **66,759,963 representative proteins**, their **3D structures +
+sequences + selection metadata** as parquet in S3
+(`s3://marinfold-exp91-usw2/exp91/structures/parts/`, 3,338 parts, 66,759,963 rows
+exactly). Schema is aligned to `timodonnell/afdb-24M`. **Ready for
+`contacts-v1 generate`.**
 
 ## The run
 
@@ -36,8 +39,8 @@ remaining `materialize.py` step (multi-TB, see "What remains").
 Durable — no bucket lifecycle/expiry policy, versioning off; persists until
 explicitly deleted. Final total **185 objects / 312 GB** (~$7/month in S3 Standard;
 most of it the intermediate `survivors_0_*.fasta` shards — the deliverables, manifest
-+ `clu_rep_seq.fasta`, are ~27 GB). **The structures are NOT here** (they remain as
-encoded `structure_blob` in the Atlas Lance dataset).
++ `clu_rep_seq.fasta`, are ~27 GB). The materialized **structures live in a separate
+prefix** (`structures/parts/`, see "Materialize" below), not here.
 
 | Object | Size | Contents |
 |---|---|---|
@@ -49,6 +52,48 @@ encoded `structure_blob` in the Atlas Lance dataset).
 | `pipeline.log` | 4.9 MB | Full run log (per-stage/per-chunk timings, RAM/disk). |
 | `_progress_novelty/`, `_progress_leakage/` | — | Per-chunk drop-ID checkpoints (resume state). |
 | `_DONE`, `_pipeline_ok` | — | Success markers. |
+
+## Materialize (structures) — DONE 2026-07-08 (`s3://marinfold-exp91-usw2/exp91/structures/parts/`)
+
+Decoded each selected rep's `structure_blob` (Atlas Lance) → mmCIF → parquet.
+Ran as **2 shards** (`chunk_id % 2`) across 2× c7i.24xlarge in us-west-2, each
+self-terminating with a `_DONE_shard_<id>` marker; both finished ~01:5x UTC.
+
+- **3,338 parts** (`part_00000.parquet` … `part_03337.parquet`), chunk_ids
+  0-3337 contiguous, 0 missing / 0 dupes.
+- **66,759,963 rows total** (Parquet-footer tally) — matches
+  `selected_manifest.csv` exactly. Last part is the partial final chunk (19,963 rows).
+- `seq_ok` (blob-decoded sequence == Atlas `sequence`) essentially all True
+  (~1 mismatch per 20k spot-checked — trace rate, non-aborting integrity check).
+- Cost: probe + diagnostic + materialize ~$40 (total exp91 ~$135).
+
+### Schema (per part) — aligned to `timodonnell/afdb-24M`
+
+`entry_id, cif_content, sequence, seq_ok, split, source, seq_len, global_plddt,
+ptm, plddt_std, seq_cluster_id, cluster_size`
+
+- Renamed to match afdb-24M: `mean_plddt` → `global_plddt`, `cluster_id` →
+  `seq_cluster_id`. `entry_id` / `cif_content` / `seq_len` already matched.
+- `split = "train"` (constant); real train/val/test holdout **deferred** to a later
+  decision coordinated with the (unbuilt) eval set + its leakage dedup.
+- `source = "esm-atlas-v1"`.
+- Atlas-specific extras kept: `sequence`, `seq_ok`, `ptm`, `plddt_std`,
+  `cluster_size`. afdb-only cols (uniprot_accession/tax_id/organism_name/
+  struct_cluster_id/gcs_uri) are **not** fabricated.
+- **CAVEAT:** afdb `global_plddt` may be 0-100 while Atlas values are 0-1 (same
+  column name) — rescale before training on the union.
+
+### How the OOM was beaten (the hard part of this step)
+
+Repeated "wedges" (2- and 4-box, and a 1-box diagnostic) all froze ~8-10 min in
+with CPU → 1%, NetworkIn → 0. `--log-io` proved the cause was **per-worker RAM
+creep → OOM cascade**, not S3: Arrow's memory pool retained freed `take()` buffers
+and glibc retained decoded-CIF string arenas; × many synchronized workers → the
+192 GB box OOM-killed mid-first-chunk. Fixes that held: `_release_memory()`
+(`pa.default_memory_pool().release_unused()` + glibc `malloc_trim(0)`) after each
+sub-batch (intra-chunk creep) + `maxtasksperchild=1` on the decode Pool (fresh
+process per chunk → resets cross-chunk creep) + `DECODE_WORKERS=64`. See the
+memory note `exp91-full-run-in-flight` for the full diagnostic trail.
 
 ## Validated facts (useful for the next run)
 
@@ -64,29 +109,20 @@ encoded `structure_blob` in the Atlas Lance dataset).
 
 ## What remains
 
-1. **Decide the final size before materializing.** 66.76M reps came from clustering at
-   40% id; the eval-dataset design targeted a 10-100M subset, so this fits, but
-   materializing all 66.76M structures is multi-TB. Options to shrink: tighten
-   `CLUSTER_ID` (coarser clusters), or sample the manifest. **This is a deliberate
-   decision, not a default.**
+1. **`contacts-v1 generate`** on the `structures/parts/` prefix (all in-region
+   us-west-2). This is the immediate next step — the dataset is ready.
 
-2. **Materialize structures (`materialize.py`).** Decode each selected rep's
-   `structure_blob` (Atlas Lance) → mmCIF → parquet in the `contacts-v1 generate`
-   schema (`entry_id` + `cif_content`). Size budget:
-   - ~150-180 KB of CIF text per structure × 66.76M ≈ **~10 TB uncompressed**
-     (~2-4 TB compressed parquet), plus ~0.7 TB to read the blobs from the Atlas.
-   - Run **in-region (us-west-2)** to avoid egress; shardable
-     (`--num-shards N --shard-id i`). Write to
-     `gs://marin-<region>/...` only after a single bulk copy (respect the >10 GB
-     cross-region sign-off rule); the Atlas is in AWS, marin is GCS.
-
-3. **Publish design (gated).** Any HF publish is cross-cloud, multi-TB (needs
+2. **Publish design (gated).** Any HF publish is cross-cloud, multi-TB (needs
    sign-off), and the Atlas is **CC BY-SA 4.0** (ShareAlike) — verify exact license
    terms before republishing a derived dataset.
 
-4. **Housekeeping.** The finish upload pushes the intermediate `survivors_0_*.fasta`
-   (~122 GB) every run; a future edit to `run_aws.py`'s finish() excludes could skip
-   those and save ~20 min + a few $ per run.
+3. **Land the branch.** `exp/91-evals-esmfold2-atlas` is still local: push +
+   open a PR (`/ultrareview` against `origin/main`), merge, delete.
+
+4. **Housekeeping (optional).** Prune the run logs left in the `structures/` prefix
+   (`pipeline_shard_*.log(.live)`, `probe.log.live`) before any HF publish. The
+   funnel `out/` prefix still carries ~122 GB of intermediate `survivors_0_*.fasta`
+   (kept for debugging; deletable).
 
 ## Failures & fixes (for reproducibility)
 
