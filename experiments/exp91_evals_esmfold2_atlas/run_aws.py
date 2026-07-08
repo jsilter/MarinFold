@@ -47,7 +47,7 @@ EXP65_SEQS = (HERE.parent / "exp65_evals_low_msa_depth_proteins"
 # Scripts the instance needs (pipeline imports atlas_io + selection; funnel is
 # carried for parity / post-selection QC).
 SCRIPTS = ["pipeline.py", "atlas_io.py", "selection.py", "funnel.py",
-           "materialize.py"]
+           "materialize.py", "probe_throughput.py"]
 
 # Cloud-init bootstrap. {placeholders} are filled by render_user_data().
 USER_DATA_TMPL = r"""#!/bin/bash
@@ -206,6 +206,10 @@ def build_materialize_args(args: argparse.Namespace) -> str:
     parts = ["--chunk-size", args.chunk_size,
              "--scan-workers", args.scan_workers,
              "--workers", args.decode_workers]
+    if args.take_batch is not None:
+        parts += ["--take-batch", args.take_batch]
+    if args.mat_num_shards > 1:
+        parts += ["--num-shards", args.mat_num_shards, "--shard-id", args.mat_shard_id]
     if args.limit is not None:
         parts += ["--limit", args.limit]
     return " ".join(str(p) for p in parts)
@@ -217,6 +221,61 @@ def render_materialize_user_data(args: argparse.Namespace) -> str:
         output=args.s3_output.rstrip("/"),
         manifest_uri=args.manifest_uri,
         materialize_args=build_materialize_args(args))
+
+
+# Probe (throughput sweep): pull the plan from S3, sweep (workers x take_batch) on the
+# real target box for a few minutes each, ship the results log to S3, self-terminate.
+# No manifest / no output parts — this only measures, it does not materialize.
+PROBE_USER_DATA_TMPL = r"""#!/bin/bash
+exec > /var/log/marinfold-pipeline.log 2>&1
+shutdown -h +60 "marinfold-exp91 probe 1h cap" || true
+finish() {{
+  rc=$?
+  trap - EXIT INT TERM
+  aws s3 cp /var/log/marinfold-pipeline.log {output}/probe.log 2>/dev/null || true
+  shutdown -c 2>/dev/null || true
+  shutdown -h now
+}}
+trap finish EXIT INT TERM
+
+set -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y python3-pip awscli
+pip3 install --quiet pylance pyarrow pandas numpy gemmi msgpack msgpack-numpy \
+    brotli zstandard
+
+mkdir -p /opt/exp91 && cd /opt/exp91
+aws s3 cp {staging}/scripts.tar.gz .
+tar xzf scripts.tar.gz
+
+# Heartbeat the live probe log to S3 so we can read the sweep as it runs.
+( while true; do
+    aws s3 cp /var/log/marinfold-pipeline.log {output}/probe.log.live 2>/dev/null || true
+    sleep 30
+  done ) &
+disown || true
+
+mkdir -p /opt/work/plan
+aws s3 sync {output}/plan /opt/work/plan 2>/dev/null || true
+python3 probe_throughput.py --work-dir /opt/work {probe_args}
+"""
+
+
+def build_probe_args(args: argparse.Namespace) -> str:
+    parts = ["--seconds", args.probe_seconds,
+             "--workers", *args.probe_workers,
+             "--take-batch", *args.probe_take_batch]
+    if args.probe_blobs_only:
+        parts.append("--blobs-only")
+    return " ".join(str(p) for p in parts)
+
+
+def render_probe_user_data(args: argparse.Namespace) -> str:
+    return PROBE_USER_DATA_TMPL.format(
+        staging=args.s3_staging.rstrip("/"),
+        output=args.s3_output.rstrip("/"),
+        probe_args=build_probe_args(args))
 
 
 def build_pipeline_args(args: argparse.Namespace) -> str:
@@ -307,6 +366,9 @@ def launch(args: argparse.Namespace) -> None:
     if args.task == "materialize":
         user_data = render_materialize_user_data(args)
         name_tag = "marinfold-exp91-materialize"
+    elif args.task == "probe":
+        user_data = render_probe_user_data(args)
+        name_tag = "marinfold-exp91-probe"
     else:
         user_data = render_user_data(args)
         name_tag = "marinfold-exp91-funnel"
@@ -356,7 +418,8 @@ def _watch(s3, s3_output: str, region: str, poll_s: int = 60) -> None:
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     # task: funnel (scan->select) or materialize (decode selected reps to parquet)
-    ap.add_argument("--task", choices=["funnel", "materialize"], default="funnel")
+    ap.add_argument("--task", choices=["funnel", "materialize", "probe"],
+                    default="funnel")
     # AWS wiring
     ap.add_argument("--s3-staging", required=True, help="s3://bucket/prefix for scripts")
     ap.add_argument("--s3-output", required=True, help="s3://bucket/prefix for results")
@@ -369,6 +432,21 @@ def main(argv: list[str] | None = None) -> None:
                     help="materialize: reps per plan chunk / output part")
     ap.add_argument("--decode-workers", type=int, default=1,
                     help="materialize: parallel decode processes (set ~vCPU count)")
+    ap.add_argument("--take-batch", type=int, default=None,
+                    help="materialize: reps per Lance take/decode sub-batch")
+    ap.add_argument("--mat-num-shards", type=int, default=1,
+                    help="materialize: split chunks across this many boxes")
+    ap.add_argument("--mat-shard-id", type=int, default=0,
+                    help="materialize: this box's shard index")
+    # probe task (throughput sweep)
+    ap.add_argument("--probe-workers", type=int, nargs="+",
+                    default=[64, 128, 192, 256], help="probe: worker counts to sweep")
+    ap.add_argument("--probe-take-batch", type=int, nargs="+", default=[512],
+                    help="probe: take/decode sub-batch sizes to sweep")
+    ap.add_argument("--probe-seconds", type=int, default=90,
+                    help="probe: seconds per (workers, take_batch) config")
+    ap.add_argument("--probe-blobs-only", action="store_true",
+                    help="probe: skip decode to isolate pure S3 read throughput")
     ap.add_argument("--iam-instance-profile", required=True,
                     help="instance profile name with S3 read/write on those buckets")
     ap.add_argument("--region", default="us-west-2")
@@ -413,7 +491,12 @@ def main(argv: list[str] | None = None) -> None:
         ap.error("--manifest-uri is required for --task materialize")
 
     if args.dry_run:
-        if args.task == "materialize":
+        if args.task == "probe":
+            print("=== probe args ===")
+            print(build_probe_args(args))
+            print("\n=== user-data (cloud-init) ===")
+            print(render_probe_user_data(args))
+        elif args.task == "materialize":
             print("=== materialize args ===")
             print(build_materialize_args(args))
             print("\n=== user-data (cloud-init) ===")

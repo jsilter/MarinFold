@@ -87,8 +87,18 @@ TEST_VOLUME_GB="600"
 MATERIALIZE_INSTANCE_TYPE="c7i.24xlarge"  # 96 vCPU / 192 GB; decode is CPU + S3-I/O bound
 MATERIALIZE_VOLUME_GB="4000"              # holds the full ~3.2 TB of parts locally + headroom
 CHUNK_SIZE="20000"                        # reps per plan chunk / output part (~0.9 GB/part)
-DECODE_WORKERS="64"                       # parallel decode procs (64 x ~1.5 GB fits 192 GB)
+# Decode is S3-read-latency bound (a local probe: ~6 ms/structure decode vs ~200 ms
+# take), so the 96 vCPUs sit ~97% idle waiting on S3 -> throughput scales with the
+# number of concurrent workers, capped by RAM (each take buffers ~GBs of Lance pages).
+# TAKE_BATCH is small so many workers fit; DECODE_WORKERS oversubscribes the vCPUs.
+# The `probe` target measures the sweet spot before a full run.
+DECODE_WORKERS="192"                      # oversubscribe 96 vCPU (I/O-bound; CPUs idle)
+TAKE_BATCH="384"                          # reps per take/decode sub-batch (bounds worker RAM)
 MATERIALIZE_LIMIT="2000"                  # materialize-smoke: only this many reps
+# --- probe (throughput sweep) knobs -------------------------------------------
+PROBE_WORKERS="${PROBE_WORKERS:-96 160 224 288}"  # worker counts to sweep
+PROBE_TAKE_BATCH="${PROBE_TAKE_BATCH:-256 512}"   # take/decode sub-batch sizes to sweep
+PROBE_SECONDS="${PROBE_SECONDS:-90}"              # wall-clock window per config
 
 # --- local-smoke knobs --------------------------------------------------------
 LOCAL_SMOKE_LIMIT="50000"                 # Atlas rows scanned in the local smoke
@@ -249,9 +259,31 @@ launch_materialize() {  # $1 = output prefix, remaining args appended to run_aws
     --chunk-size "$CHUNK_SIZE" \
     --scan-workers "$SCAN_WORKERS" \
     --decode-workers "$DECODE_WORKERS" \
+    --take-batch "$TAKE_BATCH" \
     ${KEY_NAME:+--key-name "$KEY_NAME"} \
     ${SECURITY_GROUP_ID:+--security-group-id "$SECURITY_GROUP_ID"} \
     --watch "$@"
+}
+
+probe() {
+  # Measure decode throughput + RAM floor on the real target box before a full run:
+  # sweep (workers x take_batch), each for PROBE_SECONDS, reading the plan already in
+  # S3 at STRUCT_OUT/plan. Writes probe.log(.live); self-terminates (1h cap). Cheap
+  # (~15 min of one c7i.24xlarge). No --watch (probe emits probe.log, not _DONE).
+  echo "[probe] sweep workers=[$PROBE_WORKERS] x take_batch=[$PROBE_TAKE_BATCH] -> ${STRUCT_OUT}/probe.log"
+  uv run python run_aws.py --task probe \
+    --s3-staging "$STAGING" \
+    --s3-output  "$STRUCT_OUT" \
+    --iam-instance-profile "$IAM_PROFILE" \
+    --region "$REGION" \
+    --instance-type "$MATERIALIZE_INSTANCE_TYPE" \
+    --volume-size-gb 100 \
+    --probe-workers $PROBE_WORKERS \
+    --probe-take-batch $PROBE_TAKE_BATCH \
+    --probe-seconds "$PROBE_SECONDS" \
+    ${KEY_NAME:+--key-name "$KEY_NAME"} \
+    ${SECURITY_GROUP_ID:+--security-group-id "$SECURITY_GROUP_ID"}
+  echo "[probe] live log: aws s3 cp ${STRUCT_OUT}/probe.log.live -"
 }
 
 materialize() {
@@ -280,6 +312,7 @@ case "${1:-}" in
   manifest)          manifest ;;
   materialize)       materialize ;;
   materialize-smoke) materialize_smoke ;;
+  probe)             probe ;;
   all)               prep_ref; run; manifest ;;
-  *) echo "usage: $0 {local-smoke|prep-ref|smoke|test|run|manifest|materialize|materialize-smoke|all}" >&2; exit 2 ;;
+  *) echo "usage: $0 {local-smoke|prep-ref|smoke|test|run|manifest|materialize|materialize-smoke|probe|all}" >&2; exit 2 ;;
 esac

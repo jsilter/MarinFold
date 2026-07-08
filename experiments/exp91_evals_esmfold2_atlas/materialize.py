@@ -317,6 +317,7 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
     if out.exists():
         return cid, -1, 0, 0.0  # already done (n_written=-1 signals "skipped")
 
+    take_batch = spec.get("take_batch", _TAKE_BATCH)
     t0 = time.monotonic()
     plan = pq.read_table(work / "plan" / f"chunk_{cid:05d}.parquet").to_pandas()
     tmp = parts_dir / f".part_{cid:05d}.parquet.tmp"
@@ -325,8 +326,8 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
     n_mismatch = 0
     try:
         # Process the chunk in sub-batches so peak RAM is bounded regardless of chunk size.
-        for b0 in range(0, len(plan), _TAKE_BATCH):
-            sub = plan.iloc[b0:b0 + _TAKE_BATCH]
+        for b0 in range(0, len(plan), take_batch):
+            sub = plan.iloc[b0:b0 + take_batch]
             indices = sub["row_index"].to_numpy().tolist()
             tbl = _DS.take(indices, columns=["protein_hash", "structure_blob", "sequence"])
             got_hash = tbl.column("protein_hash").to_pylist()
@@ -376,14 +377,25 @@ def _materialize_chunk(spec: dict) -> tuple[int, int, int, float]:
     return cid, n_written, n_mismatch, time.monotonic() - t0
 
 
-def stage_run(work: Path, *, workers: int, skip_list: Path | None) -> None:
-    """Decode all planned chunks into checkpointed parts (resumable)."""
+def stage_run(work: Path, *, workers: int, skip_list: Path | None,
+              take_batch: int = _TAKE_BATCH, num_shards: int = 1, shard_id: int = 0,
+              max_chunks: int | None = None) -> None:
+    """Decode all planned chunks into checkpointed parts (resumable).
+
+    Sharding (``num_shards``/``shard_id``): each shard owns the chunks whose id is
+    ``id % num_shards == shard_id``, so N boxes can decode disjoint chunk sets into
+    the same ``parts/`` prefix with no coordination (the work is S3-read-latency
+    bound, so throughput scales ~linearly per box). ``max_chunks`` caps the number
+    of chunks decoded — used by the throughput probe to time a small burst.
+    """
     plan_dir = work / "plan"
     parts_dir = work / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
     chunks = sorted(int(p.stem.split("_")[1]) for p in plan_dir.glob("chunk_*.parquet"))
     if not chunks:
         raise SystemExit(f"no plan chunks in {plan_dir}; run the 'plan' stage first")
+    if num_shards > 1:
+        chunks = [c for c in chunks if c % num_shards == shard_id]
 
     # Resume: skip chunks whose part is already present locally or in the S3-derived
     # skip list (chunk ids, one per line) the launcher builds at boot.
@@ -391,13 +403,17 @@ def stage_run(work: Path, *, workers: int, skip_list: Path | None) -> None:
     if skip_list and skip_list.exists():
         done |= {int(x) for x in skip_list.read_text().split() if x.strip().isdigit()}
     todo = [c for c in chunks if c not in done]
-    _log(f"[run] {len(chunks):,} chunks total; {len(done):,} already done; "
-         f"{len(todo):,} to do on {workers} workers; {_resources(work)}")
+    if max_chunks is not None:
+        todo = todo[:max_chunks]
+    shard_tag = f"shard {shard_id}/{num_shards}, " if num_shards > 1 else ""
+    _log(f"[run] {shard_tag}{len(chunks):,} chunks in shard; {len(done):,} already done; "
+         f"{len(todo):,} to do on {workers} workers (take_batch {take_batch:,}); "
+         f"{_resources(work)}")
     if not todo:
         _log("[run] nothing to do — all chunks materialized")
         return
 
-    specs = [{"work": str(work), "chunk_id": c} for c in todo]
+    specs = [{"work": str(work), "chunk_id": c, "take_batch": take_batch} for c in todo]
     n_done = n_rows = n_mismatch = 0
     t_start = time.monotonic()
     ctx = mp.get_context("spawn")  # Lance is not fork-safe; each worker opens its own handle
@@ -438,8 +454,19 @@ def main(argv: list[str] | None = None) -> None:
                     help="cap Atlas rows considered in the plan scan (testing)")
     ap.add_argument("--skip-list", type=Path, default=None,
                     help="file of chunk ids (from S3) to treat as already done")
+    ap.add_argument("--take-batch", type=int, default=_TAKE_BATCH,
+                    help="reps per Lance take/decode sub-batch (bounds worker RAM; "
+                         "smaller lets more workers run, raising S3 read concurrency)")
+    ap.add_argument("--num-shards", type=int, default=1,
+                    help="split chunks across this many boxes (chunk_id %% num_shards)")
+    ap.add_argument("--shard-id", type=int, default=0, help="this box's shard index")
+    ap.add_argument("--max-chunks", type=int, default=None,
+                    help="decode at most N chunks then stop (throughput probe)")
     args = ap.parse_args(argv)
     args.work_dir.mkdir(parents=True, exist_ok=True)
+    if not 0 <= args.shard_id < args.num_shards:
+        raise SystemExit(f"--shard-id {args.shard_id} out of range for "
+                         f"--num-shards {args.num_shards}")
 
     if args.stage in ("plan", "full"):
         if args.manifest is None:
@@ -451,7 +478,9 @@ def main(argv: list[str] | None = None) -> None:
         _log(f"=== stage plan: DONE — {_resources(args.work_dir)}")
     if args.stage in ("run", "full"):
         _log(f"=== stage run: START — {_resources(args.work_dir)}")
-        stage_run(args.work_dir, workers=args.workers, skip_list=args.skip_list)
+        stage_run(args.work_dir, workers=args.workers, skip_list=args.skip_list,
+                  take_batch=args.take_batch, num_shards=args.num_shards,
+                  shard_id=args.shard_id, max_chunks=args.max_chunks)
         _log(f"=== stage run: DONE — {_resources(args.work_dir)}")
 
 
