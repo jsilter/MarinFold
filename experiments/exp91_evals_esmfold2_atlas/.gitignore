@@ -25,6 +25,9 @@ paper.txt
 data/_*
 _localsmoke/
 
+# Local, untracked launcher wrappers (carry config/secrets; run, don't commit).
+*.local.sh
+
 # AWS credentials — NEVER commit. Exported from CloudShell, short-lived.
 aws_keys.env
 *.env
