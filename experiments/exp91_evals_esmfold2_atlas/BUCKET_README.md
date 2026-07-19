@@ -22,11 +22,11 @@ the two datasets union cleanly into one training corpus.
 
 ```
 structures/parts/part_NNNNN.parquet   # 3,338 parts, 20k structures each; the payload
-selected_manifest.csv                  # 66,759,963 rows: the authoritative rep list + scores
+selected_manifest.parquet              # 66,759,963 rows: the authoritative rep list + scores
 README.md                              # this file
 ```
 
-`selected_manifest.csv` is the funnel's deliverable (columns `cluster_id,
+`selected_manifest.parquet` is the funnel's deliverable (columns `cluster_id,
 protein_hash, seq_len, mean_plddt, ptm, plddt_std, cluster_size`); it joins to the
 parts on `protein_hash` == `entry_id` if you want to reconcile the selection with
 the materialized structures.
@@ -104,13 +104,24 @@ cif = batch.column("cif_content")[0].as_py()   # parse with gemmi / biotite
 This is the input format `marinfold contacts-v1 generate` reads (`entry_id` +
 `cif_content`), so it feeds document generation unchanged.
 
-## License
+## License & attribution
 
-The ESM Atlas is distributed under **CC BY-SA 4.0** per the
-[AWS Open Data registry](https://registry.opendata.aws/) (the paper PDF states
-CC BY — the two disagree). This derived dataset is redistributed under the same
-**CC BY-SA 4.0** with attribution to the ESM Atlas authors (Biohub). ShareAlike
-applies: downstream redistribution must carry the same license.
+Released under [**CC BY 4.0**](https://creativecommons.org/licenses/by/4.0/): free
+to use, share, and adapt with attribution.
 
-> Before any public/first-class release, verify the exact data-license terms on the
-> canonical source (registry vs. paper) and set the repo license accordingly.
+This is a **modified, derived** dataset — a quality-filtered, novelty-deduplicated,
+re-clustered, and re-materialized subset of the ESM Atlas (see [Provenance](#provenance)).
+It is **not** the original Atlas data.
+
+**Attribution for the source data** (required by the Atlas's CC BY license):
+
+> ESM Atlas (ESMFold2), Biohub. *Language Modeling Materializes a World Model of
+> Protein Biology.* bioRxiv 2026.06.03.729735.
+> <https://doi.org/10.1101/2026.06.03.729735>. Licensed under
+> [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+The paper states CC BY; the AWS Open Data registry lists CC BY-SA. We treat the
+paper's CC BY as authoritative for this release.
+
+**If you use this dataset**, please attribute both the source above and this derived
+dataset (`open-athena/esm-atlas-esmfold2-distill`, MarinFold exp91).
