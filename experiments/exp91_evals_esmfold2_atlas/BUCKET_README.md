@@ -8,7 +8,8 @@ materialized to mmCIF for MarinFold training-set expansion.
 
 Each row is one **cluster representative**: its decoded 3D structure (mmCIF text,
 per-residue pLDDT in the B-factor column), its sequence, and the selection metadata
-that put it here. Built for MarinFold issue #91. The column layout is aligned to
+that put it here. Built for MarinFold
+[issue #91](https://github.com/Open-Athena/MarinFold/issues/91). The column layout is aligned to
 [`timodonnell/afdb-24M`](https://huggingface.co/datasets/timodonnell/afdb-24M) so
 the two datasets union cleanly into one training corpus.
 
@@ -84,9 +85,10 @@ mmCIF) and written to the parts here.
 - **Source dataset:** ESM Atlas v1 `folds_1B.lance` (AWS Open Data, `us-west-2`)
 - **Novelty/leakage reference:** afdb-24M cluster reps via the exp41 foldseek DB
   ([`silterra/afdb-24M-foldseek-train-reps`](https://huggingface.co/buckets/silterra/afdb-24M-foldseek-train-reps))
-- **Builder:** `experiments/exp91_evals_esmfold2_atlas/` in the MarinFold repo
-  (`pipeline.py` funnel → `materialize.py` decode → `upload_to_hf.py` publish),
-  run on AWS `us-west-2`, 2026-07.
+- **Builder:** [`experiments/exp91_evals_esmfold2_atlas/`](https://github.com/jsilter/MarinFold/tree/exp/91-evals-esmfold2-atlas)
+  in the MarinFold repo (`pipeline.py` funnel → `materialize.py` decode →
+  `upload_to_hf.py` publish), run on AWS `us-west-2`, 2026-07.
+- **Issue / discussion:** [Open-Athena/MarinFold#91](https://github.com/Open-Athena/MarinFold/issues/91)
 
 ## Use
 
