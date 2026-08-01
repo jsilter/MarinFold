@@ -1,0 +1,9 @@
+{
+  "n_heterodimers": 30,
+  "n_homodimers": 15,
+  "n_failed": 0,
+  "total_bytes": 21153117,
+  "download_seconds": 22.2,
+  "format": "cif",
+  "homo_iptm_min": 0.8
+}

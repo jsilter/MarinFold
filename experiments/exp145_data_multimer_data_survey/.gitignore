@@ -1,0 +1,6 @@
+# Downloaded structures and Foldseek scratch. Regenerate with:
+#   python3 fetch_dimer_sample.py --n-hetero 30 --n-homo 15 --out sample
+# 45 structures is ~22 MB, which does not belong in git. The manifest and every
+# derived result live in data/ and are committed.
+sample/
+__pycache__/

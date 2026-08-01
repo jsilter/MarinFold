@@ -445,6 +445,60 @@ complex-capable database on the Foldseek server besides PDB100). This is the
 closest thing to a curated, deduplicated aggregate of the predicted-complex
 literature, and at ~300 k it is about 1% the size of the new AFDB dimer release.
 
+## Foldseek-Multimer smoke test
+
+Run on 2026-08-01 against Foldseek `718d4217` to check that the AFDB complex files
+can be clustered at all before anyone plans a run over the ~1.78 M confident
+models. Two scripts, both capped and both cheap:
+
+- **`fetch_dimer_sample.py`** pulls 30 heterodimers (gated on the release's own
+  `passes_quality_threshold`) and 15 homodimers (gated on ipTM ≥ 0.8, a proxy for
+  the unpublished official criterion) by range-reading the FTP metadata CSVs at ten
+  spread-out offsets, then downloading each model from
+  `https://alphafold.ebi.ac.uk/files/AF-<id>-model_v1.cif`. **45 structures,
+  21.2 MB, 22.2 s, zero failures.** `MAX_STRUCTURES = 250` raises rather than
+  truncates, so the script cannot be turned into a bulk downloader by accident.
+- **`smoke_test_foldseek_multimer.py`** runs `easy-multimercluster` and
+  `easy-multimersearch` over that sample.
+
+Foldseek read all 90 chains from the 45 ModelCIF files with no parse warnings, so
+AFDB complex files need no conversion. Both commands finished in about 3 seconds.
+
+| | |
+|---|---|
+| structures / chains ingested | 45 / 90 |
+| clusters (`--multimer-tm-threshold 0.5`) | 41 |
+| multi-member clusters | 3 (sizes 3, 2, 2) |
+| complex pairs in the search report | 645 |
+| pairs with multimer TM ≥ 0.5 | 6 |
+| pairs where both chains aligned | 194 |
+
+A 1.1× reduction is what a random draw of 45 complexes from a 7.6 M set should
+give, so the number that matters is what the three multi-member clusters contain:
+
+- **GDU4/LOG2 with GDU1/LOG2** (*Arabidopsis*, tax 3702). GDU1 and GDU4 are
+  paralogous glutamine dumpers bound to the same ubiquitin ligase.
+- **LOC100805631/LOC100789233 with LOC100805631/LOC100796470** (soybean, tax 3847).
+  Shared first partner, paralogous second partners.
+- **bma-lsm-6/bma-lsm-5.1, bma-snr-7/bma-snr-5, bma-lsm-6/bma-snr-6** (*Brugia
+  malayi*, tax 6279), the 3-member cluster. All six proteins are Sm/Lsm family
+  subunits, which assemble into a heptameric ring, so pairwise decomposition of one
+  ring yields many copies of the same Sm-Sm interface.
+
+The Sm-ring case is the one to keep in mind when planning the full run. Those three
+complexes carry six different gene names, so a sequence-identity filter on gene
+pairs would have kept all three as distinct training examples. Interface-level
+clustering collapses them, which is the correct answer, and it is the same lesson
+exp41 hit on monomers: 65 of 99 FoldBench structures overlapped training
+structurally while sitting below 30% sequence identity.
+
+One trap worth recording, because it fails silently. Passing the structure files as
+separate argv entries instead of as a directory makes Foldseek treat all but the
+last one or two as something else and **still exit 0**; the first run of this smoke
+test reported a clean clustering of 2 chains as if it had covered all 45 structures.
+`assert_all_chains_ingested()` now checks the reported database size against
+2 × the number of files and raises.
+
 ## Conclusion
 
 **Both of our current corpora are strictly monomeric, and this was verified rather
@@ -506,6 +560,14 @@ and remain unidentified.
 
 - `probe_pdb.py`: the PDB census. `python3 probe_pdb.py --out data`. Faceted
   count queries only; writes the CSVs in `data/`.
+- `fetch_dimer_sample.py`: the capped dimer sampler.
+  `python3 fetch_dimer_sample.py --n-hetero 30 --n-homo 15 --out sample`. Writes
+  `sample/structures/` (gitignored) plus a manifest committed as
+  `data/dimer_sample_manifest.csv`.
+- `smoke_test_foldseek_multimer.py`: the Foldseek run.
+  `python3 smoke_test_foldseek_multimer.py --sample sample --out data`. Needs no
+  preinstalled Foldseek; `foldseek_env.py` downloads a static build into
+  `~/.cache/marinfold/foldseek` on first use.
 - AFDB and ESM Atlas numbers were read interactively; the commands are quoted
   inline above (FTP directory listings, range requests against the metadata CSVs,
   and `lance` / `pyarrow` reads against `s3://esm-protein-atlas` with
