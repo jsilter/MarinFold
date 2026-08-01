@@ -39,7 +39,8 @@ Everything else is much as expected:
 | AFDB main release (v6) | **none**; 241,070,489 single-chain models | n/a | FTP + GCS, public |
 | AFDB `collaborations/nvda/` | **~29 M predicted dimers** (~21 M homo, ~7.6 M hetero) | ~1.5–1.9 M homo, ~70 k hetero pass confidence gates | FTP only, 48.8 TB |
 | ESM Atlas | **none**; 1,095,530,880 + 6,600,755 single-chain models | n/a | S3, public |
-| PDB (experimental ground truth) | 200,372 multi-chain protein assemblies | **37,124** sequence clusters at 30% identity | RCSB, public |
+| PDB (experimental ground truth) | 200,372 multi-chain protein assemblies | **~40,000** distinct interfaces (three methods agree) | RCSB, public |
+| PINDER / PPIRef (PDB-derived) | 2,319,564 dimers / 322,454 interfaces | 42,220 clusters / 45,553 interfaces | public, CC |
 | RCSB computed structure models | 2,063 multi-chain (of 1,062,058) | n/a | RCSB |
 | ModelArchive | ~11,900 confirmed multi-chain (of 625,966) | concentrated in ~25 deposits | per-deposit ZIP, CC BY-**SA** |
 | BFMD (Foldseek) | 297,570 aggregated multimer predictions | 51,757 representatives | Foldseek `databases` |
@@ -136,7 +137,8 @@ large mass of speculative pairings rather than filtering them out.
 
 #### Coverage
 
-From the same sampling, the two sets are shaped quite differently:
+A separate pass (10 windows of 2 MB, giving 72,286 homodimer and 61,762
+heterodimer rows) shows the two sets are shaped quite differently:
 
 - **Homodimers are one model per protein.** Every `uniprotAccession` in the sample
   was unique (72,286 distinct accessions in 72,286 rows); they ran the monomer
@@ -334,6 +336,36 @@ complex deposits.
 
 ## Other databases
 
+### PDB-derived interface datasets, and a useful convergence
+
+Two curated redundancy-reduced interface sets are worth knowing, mostly because
+they independently corroborate the scale I measured against RCSB:
+
+- **[PINDER](https://doi.org/10.1101/2024.07.17.603980)** (2024): 2,319,564 dimeric
+  PPI systems mined from the PDB, split by structural clustering into a training
+  set of **1,560,682 dimers drawn from 42,220 clusters**, a 1,958-representative
+  validation set, and 1,955 high-quality test PPIs with interface leakage removed
+  (plus a 180-dimer subset clean with respect to AlphaFold-Multimer's training
+  data). Notably it already pairs 566,171 of its systems with AFDB monomer
+  structures, which is exactly the apo/holo bridge we would otherwise have to
+  build.
+- **[PPIRef](https://github.com/anton-bushuiev/PPIRef)** (ICLR 2024): PPIRef300K is
+  322,454 biophysically valid interfaces; deduplicating with the `iDist` interface
+  similarity measure leaves **PPIRef50K at 45,553 non-redundant interfaces**.
+
+Put next to my own RCSB census, three different methods land in the same place:
+
+| Method | Non-redundant multimer units |
+|---|---|
+| RCSB sequence clustering at 30% identity (this report) | 37,124 |
+| PINDER structural interface clustering (training clusters) | 42,220 |
+| PPIRef `iDist` interface deduplication | 45,553 |
+
+**Roughly 40,000 distinct protein-protein interfaces exist in the PDB**, whichever
+way you count. That is the number to hold in mind: it is what all the experimental
+multimer data in the world reduces to, and it is about four orders of magnitude
+smaller than our monomer corpora.
+
 ### ModelArchive: the established home of predicted complexes, and it is small
 
 ModelArchive is where the AlphaFold-Multimer interactome screens have historically
@@ -394,11 +426,18 @@ predicted-complex collection put together.
 
 **Filter hard and it shrinks to something familiar in size.** At the authors' own
 heterodimer quality gate only ~1% survive (~70 k complexes), which lands in the
-same range as the PDB's 37 k non-redundant multimer sequence clusters and BFMD's
-297 k aggregated predictions. The homodimers hold up much better (on the order of
+same range as the ~40 k distinct interfaces in the entire PDB and BFMD's 297 k
+aggregated predictions. The homodimers hold up much better (on the order of
 1.5–1.9 M pass ipTM ≥ 0.8 or ipSAE ≥ 0.75), which is a genuinely new quantity of
 confident complex structure, and homodimers are also where the latent demand is:
 ~2.9 M AFDB entries model proteins that UniProt annotates as homo-oligomers.
+
+**Experimental multimer data is fixed at about 40,000 distinct interfaces.** RCSB
+sequence clustering, PINDER's structural interface clustering and PPIRef's `iDist`
+deduplication independently give 37 k, 42 k and 46 k. The PDB adds roughly 6,000
+multi-chain entries a year, so this number is not going to move by an order of
+magnitude. Any multimer capability has to come mostly from predicted structures,
+which is what makes the AFDB release significant.
 
 **The ESM Atlas contributes candidate pairs, not structures.** Roughly half its
 provenance records (SPIRE, plus UHGG, IMG/VR and the uMAG sets) encode contig and
@@ -408,11 +447,18 @@ pairs, each with a folded monomer already in hand; but turning it into complex
 structures means running a predictor ourselves, not downloading anything.
 
 If we pursue multimers, the practical ordering is: the AFDB homodimer set first
-(largest confident yield, permissive license, joins on UniProt), the PDB's ~37 k
-non-redundant multimeric families as the evaluation anchor, then the AFDB
-heterodimers under their quality gate. ModelArchive and BFMD are small enough by
-comparison to be rounding errors, and ModelArchive's ShareAlike license makes it
-the least attractive of the three.
+(largest confident yield, permissive license, joins on UniProt), PINDER as the
+evaluation anchor (it already ships leakage-controlled splits and AFDB-paired
+monomers, so we would not rebuild that), then the AFDB heterodimers under their
+quality gate. ModelArchive and BFMD are small enough by comparison to be rounding
+errors, and ModelArchive's ShareAlike license makes it the least attractive of
+the three.
+
+Two open questions this survey did not settle: the nvda release has no paper yet,
+so how the heterodimer candidate pairs were chosen is unknown (it matters, because
+it determines whether the confident 1% is a biased slice); and `ntdx/` and `vr3d/`,
+two of AFDB's five collaboration datasets, carry no README and remain
+unidentified.
 
 ## Reproducing the numbers
 
