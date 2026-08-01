@@ -23,21 +23,23 @@ exact count, it says so.
 
 ## Headline
 
-**The AlphaFold DB acquired a multimer corpus in the last two months and it is
-enormous.** An NVIDIA collaboration release, published only on the AFDB FTP site
-(not the web UI, not the REST API), holds roughly **21 M predicted homodimers and
-7.6 M predicted heterodimers (about 29 M dimers and 48.8 TB)**. That is more
-predicted complexes than everything else in this report combined, by roughly two
-orders of magnitude. It is scored (ipTM, ipSAE, pDockQ, pDockQ2, LIS, clash
-counts) and cross-referenced to UniProt on both chains, so it can be filtered to
-a confident subset without re-running anything.
+**The AlphaFold DB acquired a multimer corpus this year and it is enormous.** A
+four-way EMBL-EBI / Google DeepMind / NVIDIA / Seoul National University release
+(announced March 2026, bulk data landing on the FTP site in June and July) holds
+roughly **21 M predicted homodimers and 7.6 M predicted heterodimers (about 29 M
+dimers and 48.8 TB)**. That is more predicted complexes than everything else in
+this report combined, by roughly two orders of magnitude. Every model is scored
+(ipTM, ipSAE, pDockQ, pDockQ2, LIS, clash counts) and cross-referenced to UniProt
+on both chains, so it can be filtered to a confident subset without re-running
+anything. The high-confidence slice (1.7 M homodimers, ~80 k heterodimers) is
+served from the AFDB API and web UI; the rest is FTP bulk download.
 
 Everything else is much as expected:
 
 | Source | Multimer content | Non-redundant scale | Access |
 |---|---|---|---|
 | AFDB main release (v6) | **none**; 241,070,489 single-chain models | n/a | FTP + GCS, public |
-| AFDB `collaborations/nvda/` | **~29 M predicted dimers** (~21 M homo, ~7.6 M hetero) | ~1.5–1.9 M homo, ~70 k hetero pass confidence gates | FTP only, 48.8 TB |
+| AFDB complexes (`collaborations/nvda/`) | **~29 M predicted dimers** (~21 M homo, ~7.6 M hetero) | 1.7 M homo, ~80 k hetero are high-confidence | API + web UI for the confident slice; 48.8 TB FTP bulk |
 | ESM Atlas | **none**; 1,095,530,880 + 6,600,755 single-chain models | n/a | S3, public |
 | PDB (experimental ground truth) | 200,372 multi-chain protein assemblies | **~40,000** distinct interfaces (three methods agree) | RCSB, public |
 | PINDER / PPIRef (PDB-derived) | 2,319,564 dimers / 322,454 interfaces | 42,220 clusters / 45,553 interfaces | public, CC |
@@ -154,9 +156,25 @@ heterodimer rows) shows the two sets are shaped quite differently:
   which blocks the sample hit, not true dataset proportions, but they do establish
   that the screen spans dozens of species rather than being human-only.
 
-**Access is FTP-only.** The AFDB REST API returns `{}` for these model entity IDs
-(`AF-0000000065760001`, `AF-0000000203470222`) and they do not appear in the AFDB
-web UI. Nothing but the FTP path knows they exist.
+#### Access: two tiers
+
+The high-confidence subset is a first-class part of the database, served by a
+**`/api/complex/{accession}`** endpoint that is separate from the familiar
+`/api/prediction/` one (querying a dimer's model entity ID against `/prediction/`
+returns `{}`, which is what initially misled me into thinking the release was
+FTP-only). Asking for human haemoglobin alpha returns its partners directly:
+
+```
+$ curl https://alphafold.ebi.ac.uk/api/complex/P69905
+  modelEntityId  AF-0000000211046780        providerId  NVIDIA
+  uniprotAccession  [P69905, P68873]        gene  [HBA1, HBB]
+  assemblyType  Hetero                      oligomericState  dimer
+  globalMetricValue 94.52   ipTM 0.92   ipSAE 0.87   pDockQ 0.57   pDockQ2 0.94   LIS 0.69
+```
+
+Records carry stoichiometry, a `complexName`, taxon IDs and all five interface
+scores. So the split is: **high-confidence complexes through the web UI and API,
+the full low-confidence bulk through FTP only.**
 
 #### What produced them, and under what license
 
@@ -177,8 +195,29 @@ their `_software` and `_ma_protocol_step` blocks name the pipeline exactly:
 That early-stopping threshold explains the long low-confidence tail: rather than
 discarding bad pairings, the pipeline runs them cheaply and keeps them. The
 primary citation is listed as *"AlphaFold Database expands to proteome-scale
-quaternary structures"*, marked **"To be published"**, so the corpus is out ahead
-of its paper.
+quaternary structures"*, marked **"To be published"**.
+
+#### Cross-check against the official announcement
+
+EMBL announced this on
+[2026-03-16, updated 2026-05-19](https://www.embl.org/news/science-technology/first-complexes-alphafold-database/):
+a four-way collaboration between EMBL-EBI, Google DeepMind, NVIDIA and Seoul
+National University (Steinegger lab), about 17 million GPU-hours, with candidate
+pairs drawn from **20 major studied species plus the WHO priority pathogens list**
+(which explains the crop and model-organism heavy taxa I sampled). Their published
+counts line up with my sampling closely enough to trust both:
+
+| | announced | measured here |
+|---|---|---|
+| complexes predicted | 30 M | ~29 M |
+| homodimers | 1.7 M high-confidence + 18 M lower | ~21 M total |
+| heterodimers | ~80 k high-confidence + 8.1 M lower | ~7.6 M total |
+| high-confidence homodimers | 1.7 M | ~1.5–1.9 M (ipTM ≥ 0.8 / ipSAE ≥ 0.75) |
+| high-confidence heterodimers | ~80 k | ~75 k (authors' own gate) |
+
+That agreement is worth stating plainly: the byte-offset sampling reproduced the
+official figures to within about 10%, so the derived quality fractions in the
+table above can be relied on for planning.
 
 **The license is CC-BY-4.0**, stated in each file's `_pdbx_data_usage` record
 alongside the text "AVAILABLE FOR ACADEMIC AND COMMERCIAL PURPOSES, UNDER CC-BY
@@ -415,14 +454,16 @@ than assumed.** AFDB's 241 M main-release models are one UniProt accession and o
 carries `chain_id` / `entity_id` / `sym_id` / `chain_boundaries` fields ready for
 complexes.
 
-**The situation changed in June–July 2026, and the change is large.** AFDB's FTP
-site now carries an NVIDIA collaboration release of roughly 21 M predicted
-homodimers and 7.6 M predicted heterodimers (48.8 TB), produced with
-AlphaFold-Multimer v2.3.0 weights through OpenFold, scored with ipTM/ipSAE/pDockQ,
-carrying UniProt cross-references for both chains, and licensed CC-BY-4.0 for
-commercial use. It is invisible from the AFDB web UI and API, its paper is
-unpublished, and it is roughly 100× larger than every previously available
-predicted-complex collection put together.
+**The situation changed in 2026, and the change is large.** AFDB now carries a
+four-way EMBL-EBI / DeepMind / NVIDIA / Seoul National University release of
+roughly 21 M predicted homodimers and 7.6 M predicted heterodimers (48.8 TB),
+produced with AlphaFold-Multimer v2.3.0 weights through OpenFold, scored with
+ipTM/ipSAE/pDockQ, carrying UniProt cross-references for both chains, and licensed
+CC-BY-4.0 for commercial use. It is roughly 100× larger than every previously
+available predicted-complex collection put together. The high-confidence slice is
+queryable per accession through `/api/complex/`; the bulk lives on FTP under
+`collaborations/nvda/`, which is easy to miss because nothing in the main AFDB
+download documentation points at it.
 
 **Filter hard and it shrinks to something familiar in size.** At the authors' own
 heterodimer quality gate only ~1% survive (~70 k complexes), which lands in the
@@ -454,11 +495,12 @@ quality gate. ModelArchive and BFMD are small enough by comparison to be roundin
 errors, and ModelArchive's ShareAlike license makes it the least attractive of
 the three.
 
-Two open questions this survey did not settle: the nvda release has no paper yet,
-so how the heterodimer candidate pairs were chosen is unknown (it matters, because
-it determines whether the confident 1% is a biased slice); and `ntdx/` and `vr3d/`,
-two of AFDB's five collaboration datasets, carry no README and remain
-unidentified.
+Two open questions this survey did not settle. The complex release's paper is
+still listed as "to be published" (the announcement points at a preprint on
+`research.nvidia.com` that I did not retrieve), so the exact pair-selection
+procedure inside the 20 species plus WHO-pathogen scope is not documented. And
+`ntdx/` and `vr3d/`, two of AFDB's five collaboration datasets, carry no README
+and remain unidentified.
 
 ## Reproducing the numbers
 
