@@ -10,17 +10,20 @@ nothing here touches them. Two much cheaper facts make a sample possible:
    ``heterodimer_metadata.csv`` 2.45 GB) support HTTP range requests, so a few
    hundred kB of windows is enough to harvest model IDs and their scores.
 2. Every model is individually downloadable from the ordinary AFDB file endpoint,
-   ``https://alphafold.ebi.ac.uk/files/AF-<id>-model_v1.cif`` (~50 kB on the wire,
-   gzip-encoded; ~190 kB of mmCIF once decoded).
+   ``https://alphafold.ebi.ac.uk/files/AF-<id>-model_v1.cif``. Measured over ten
+   sampled models: 115 kB on the wire when gzip is requested, 466 kB of mmCIF
+   decoded. The server only compresses if the client sends
+   ``Accept-Encoding: gzip``, which urllib does not do by default.
 
 Windows are spread evenly across each CSV on purpose. The rows are blocked by
 organism, so consecutive rows share a species and confidence correlates strongly
 with which block you land in; a single contiguous read would sample one organism.
 
 ``MAX_STRUCTURES`` is a hard ceiling that raises rather than truncates. This script
-is for smoke tests and spot checks, and a bulk download of the confident slice
-(~1.7 M homodimers, ~80 k heterodimers, roughly 89 GB) should be a deliberate
-separate job with rate limiting, not an accidentally large ``--n-hetero``.
+is for smoke tests and spot checks. A bulk download of the confident slice is
+~1.96 M homodimers plus ~70 k heterodimers, which at the sizes above is **roughly
+230 GB gzipped and 950 GB decoded**; that needs a deliberate separate job with
+rate limiting, not an accidentally large ``--n-hetero``.
 
 Usage::
 
@@ -55,9 +58,13 @@ WINDOW_BYTES = 300_000
 def _get(url: str, headers: dict[str, str] | None = None, timeout: int = 180) -> bytes:
     """GET a URL, transparently gunzipping a gzip-encoded body.
 
-    The AFDB file endpoint serves ``.cif`` gzip-encoded. urllib does not decode
-    Content-Encoding, so sniff the gzip magic number instead of trusting headers
-    (the FTP host and the files host set them differently).
+    urllib neither requests nor decodes Content-Encoding, so callers that want
+    compression ask for it explicitly and this function sniffs the gzip magic
+    number on the way back rather than trusting headers (the FTP host and the
+    files host set them differently).
+
+    Range requests deliberately do NOT ask for gzip: a byte range against a
+    compressed representation would not be the byte range the caller means.
     """
     request = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -100,22 +107,34 @@ def _to_float(row: dict[str, str], key: str) -> float:
         return float("nan")
 
 
-def hetero_is_confident(row: dict[str, str]) -> bool:
+def _pair_max(row: dict[str, str], a: str, b: str) -> float:
+    return max(_to_float(row, a), _to_float(row, b))
+
+
+def is_confident(row: dict[str, str]) -> bool:
     """The release's own gate: ipSAE >= 0.6 and pDockQ2 >= 0.23.
 
-    Encoded by the authors as the ``passes_quality_threshold`` column, so this
-    reads their verdict rather than re-deriving it. About 1% of heterodimers pass,
-    which is roughly the ~80,000 the EMBL announcement calls high-confidence.
+    The heterodimer table ships this verdict as ``passes_quality_threshold``; the
+    homodimer table ships no verdict column at all. Recomputing it from the raw
+    score columns therefore gives both sets one criterion. ``profile_confidence.py``
+    checks the recomputation against the declared column and found 123,597 of
+    123,597 heterodimer rows in agreement, zero disagreements in either
+    direction, so this is the authors' gate rather than an approximation of it.
+
+    It passes 0.92% of heterodimers (~70 k) and 9.1% of homodimers (~1.96 M).
     """
-    return (row.get("passes_quality_threshold") or "").strip() == "true"
+    return (
+        _pair_max(row, "ipSAE_AB", "ipSAE_BA") >= 0.6
+        and _pair_max(row, "pDockQ2_AB", "pDockQ2_BA") >= 0.23
+    )
 
 
-def homo_is_confident(row: dict[str, str], ipTM_min: float) -> bool:
-    """Proxy gate for homodimers, which ship no ``passes_quality_threshold``.
+def passes_iptm(row: dict[str, str], ipTM_min: float) -> bool:
+    """Alternative gate on ipTM alone, for ``--gate iptm``.
 
-    ipTM >= 0.8 selects 7.2% of sampled rows against the 1.7 M of ~21 M (8.1%)
-    the announcement calls high-confidence, so it is close to but not identical
-    with the official criterion, which has not been published.
+    Not the same population: ipTM >= 0.8 passes 5.9% of homodimers against the
+    authors' gate's 9.1%, and the two sets overlap only partly, because ipSAE
+    rescales the interface score by the size of the interface being scored.
     """
     return _to_float(row, "ipTM") >= ipTM_min
 
@@ -152,7 +171,9 @@ def download_model(model_id: str, out_dir: Path, suffix: str) -> Path:
     path = out_dir / f"{model_id}.{suffix}"
     if path.exists() and path.stat().st_size > 0:
         return path
-    path.write_bytes(_get(url))
+    # Asking for gzip cuts the transfer about 4x (115 kB against 466 kB measured);
+    # _get gunzips it, so the file on disk is plain mmCIF either way.
+    path.write_bytes(_get(url, {"Accept-Encoding": "gzip"}))
     return path
 
 
@@ -190,7 +211,13 @@ def main() -> None:
     parser.add_argument("--n-hetero", type=int, default=30, help="heterodimers to fetch")
     parser.add_argument("--n-homo", type=int, default=15, help="homodimers to fetch")
     parser.add_argument("--windows", type=int, default=10, help="byte windows per CSV")
-    parser.add_argument("--homo-iptm-min", type=float, default=0.8)
+    parser.add_argument(
+        "--gate",
+        choices=["authors", "iptm"],
+        default="authors",
+        help="confidence gate: the release's ipSAE/pDockQ2 criterion, or ipTM alone",
+    )
+    parser.add_argument("--iptm-min", type=float, default=0.8, help="only used by --gate iptm")
     parser.add_argument("--format", choices=["cif", "pdb"], default="cif")
     parser.add_argument("--out", type=Path, default=Path("sample"))
     args = parser.parse_args()
@@ -207,15 +234,15 @@ def main() -> None:
     struct_dir = args.out / "structures"
     struct_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"harvesting heterodimer IDs (gate: passes_quality_threshold)")
-    hetero = harvest("heterodimer_metadata.csv", hetero_is_confident, args.n_hetero, args.windows)
-    print(f"harvesting homodimer IDs (gate: ipTM >= {args.homo_iptm_min})")
-    homo = harvest(
-        "homodimer_metadata.csv",
-        lambda r: homo_is_confident(r, args.homo_iptm_min),
-        args.n_homo,
-        args.windows,
-    )
+    if args.gate == "authors":
+        keep, label = is_confident, "ipSAE >= 0.6 and pDockQ2 >= 0.23"
+    else:
+        keep, label = lambda r: passes_iptm(r, args.iptm_min), f"ipTM >= {args.iptm_min}"
+
+    print(f"harvesting heterodimer IDs (gate: {label})")
+    hetero = harvest("heterodimer_metadata.csv", keep, args.n_hetero, args.windows)
+    print(f"harvesting homodimer IDs (gate: {label})")
+    homo = harvest("homodimer_metadata.csv", keep, args.n_homo, args.windows)
 
     records = [build_record(r, "heterodimer") for r in hetero]
     records += [build_record(r, "homodimer") for r in homo]
@@ -252,7 +279,8 @@ def main() -> None:
         "total_bytes": sum(r["bytes"] for r in downloaded),
         "download_seconds": round(elapsed, 1),
         "format": args.format,
-        "homo_iptm_min": args.homo_iptm_min,
+        "gate": args.gate,
+        "gate_description": label,
     }
     (args.out / "fetch_summary.json").write_text(json.dumps(summary, indent=2))
     print(f"\n{json.dumps(summary, indent=2)}")
