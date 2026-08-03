@@ -22,32 +22,82 @@ object stores on **2026-07-31**, with the AFDB confidence-score profiling and th
 Foldseek run redone on **2026-08-02**; where a number is an estimate rather than
 an exact count, it says so.
 
-## Headline
+## Summary
 
-**The AlphaFold DB acquired a multimer corpus this year and it is enormous.** A
-four-way EMBL-EBI / Google DeepMind / NVIDIA / Seoul National University release
-(announced March 2026, bulk data landing on the FTP site in June and July) holds
-**21.5 M predicted homodimers and 7.6 M predicted heterodimers (about 29 M dimers
-and 48.8 TB)**. That is more predicted complexes than everything else in
-this report combined, by roughly two orders of magnitude. Every model is scored
-(ipTM, ipSAE, pDockQ, pDockQ2, LIS, clash counts) and cross-referenced to UniProt
-on both chains, so it can be filtered to a confident subset without re-running
-anything. Under the release's own quality gate that subset is **1.96 M
-homodimers and 70 k heterodimers**; it is served from the AFDB API and web UI,
-and the rest is FTP bulk download.
+The recommended data is the AlphaFold DB complex release at
+`ftp.ebi.ac.uk/pub/databases/alphafold/collaborations/nvda/`, filtered by the gate
+the release defines for itself: **ipSAE ≥ 0.6 and pDockQ2 ≥ 0.23**. That passes
+9.13% of homodimers and 0.92% of heterodimers, giving **1.96 M homodimers and
+70 k heterodimers**.
 
-Everything else is much as expected:
+The heterodimer metadata ships that verdict as a `passes_quality_threshold`
+column. The homodimer metadata ships no verdict column, so `profile_confidence.py`
+recomputes the criterion from the raw `ipSAE_AB`, `ipSAE_BA`, `pDockQ2_AB` and
+`pDockQ2_BA` columns. The recomputation agrees with the declared column on 123,597
+of 123,597 sampled heterodimer rows, with no disagreement in either direction,
+which is what licenses applying it to the homodimers.
 
-| Source | Multimer content | Non-redundant scale | Access |
-|---|---|---|---|
-| AFDB main release (v6) | **none**; 241,070,489 single-chain models | n/a | FTP + GCS, public |
-| AFDB complexes (`collaborations/nvda/`) | **~29 M predicted dimers** (21.5 M homo, 7.6 M hetero) | 1.96 M homo, 70 k hetero pass the release's quality gate | API + web UI for the confident slice; 48.8 TB FTP bulk |
-| ESM Atlas | **none**; 1,095,530,880 + 6,600,755 single-chain models | n/a | S3, public |
-| PDB (experimental ground truth) | 200,372 multi-chain protein assemblies | **~40,000** distinct interfaces (three methods agree) | RCSB, public |
-| PINDER / PPIRef (PDB-derived) | 2,319,564 dimers / 322,454 interfaces | 42,220 clusters / 45,553 interfaces | public, CC |
-| RCSB computed structure models | 2,063 multi-chain (of 1,062,058) | n/a | RCSB |
-| ModelArchive | ~11,900 confirmed multi-chain (of 625,966) | concentrated in ~25 deposits | per-deposit ZIP, CC BY-**SA** |
-| BFMD (Foldseek) | 297,570 aggregated multimer predictions | 51,757 representatives | Foldseek `databases` |
+The release is CC-BY-4.0 including commercial use, and every model carries UniProt
+accessions, taxon IDs and gene names for both chains, so it joins to what we
+already key on. At 2.03 M confident complexes it is about six times BFMD and
+ModelArchive combined; the unfiltered 29 M release is about ninety times. The
+confident models are individually queryable at
+`https://alphafold.ebi.ac.uk/api/complex/{uniprot_accession}`, and the bulk is FTP
+only. Downloading the confident slice is roughly 230 GB (a model is 466 kB of
+mmCIF and 115 kB gzipped, measured over ten of them).
+
+Three things to plan for, all from the 45-structure Foldseek-Multimer run below:
+
+- No conversion step is needed. Foldseek read all 90 chains from the 45 ModelCIF
+  files with no parse warnings.
+- Deduplicate the homodimer and heterodimer sets **together**, not as separate
+  jobs. The sample already produced a cluster holding a *Merluccius polli* SNX4
+  homodimer and a soybean heterodimer at multimer TM 0.62.
+- Sequence-level filtering will not catch the redundancy. The sample clustered
+  three *Brugia malayi* complexes carrying six different gene names, all pairwise
+  slices of one Sm/Lsm heptameric ring.
+
+### Every database checked
+
+| Database | Multimer content | Non-redundant scale |
+|---|---|---|
+| **AFDB `collaborations/nvda/`** | **21.5 M homodimers, 7.6 M heterodimers** | 1.96 M and 70 k pass the release's gate |
+| AFDB main release v6 | none; 241,070,489 single-chain models | n/a |
+| AFDB `atbc`, `bfvd`, `ntdx`, `vr3d` | none; monomer chunk-tar collections | n/a |
+| ESM Atlas | none; 1,095,530,880 + 6,600,755 single-chain models | n/a |
+| PDB (RCSB, experimental) | 200,372 multi-chain protein assemblies | 37,124 clusters at 30% sequence identity |
+| PINDER (PDB-derived) | 2,319,564 dimers | 42,220 training clusters |
+| PPIRef (PDB-derived) | 322,454 interfaces | 45,553 after `iDist` dedup |
+| BFMD (Foldseek) | 297,570 aggregated multimer predictions | 51,757 representatives |
+| ModelArchive | ~11,879 multi-chain of 625,966 | concentrated in ~25 deposits, CC BY-**SA** |
+| RCSB computed structure models | 2,063 multi-chain of 1,062,058 | the ModelArchive deposits again |
+
+The two monomer-only rows are the corpora we train on today, and both were checked
+rather than assumed. AFDB models carry one `_entity` and one `_struct_asym` record
+each, verified on P68871, P00918, P0AEX9 and P04637. For the ESM Atlas I sampled
+1,600 structures across both Lance datasets; every one had exactly one `chain_id`,
+`entity_id` and `sym_id`, even though the on-disk format carries those fields plus
+`chain_boundaries` and could represent a complex.
+
+### What this rules out
+
+Experimental multimer data is capped at roughly 40,000 distinct interfaces: RCSB
+sequence clustering, PINDER's structural clustering and PPIRef's `iDist` arrive at
+37 k, 42 k and 46 k by three different routes, and the PDB adds about 6,000
+multi-chain entries a year. A multimer capability has to be trained mostly on
+predicted structures.
+
+The ESM Atlas can contribute candidate pairs rather than structures. About half of
+its 6,824,676,938 provenance records encode contig and gene position, and 74.1% of
+555,846 sampled SPIRE accessions have an upstream neighbour on the same contig.
+Predicting those complexes ourselves is a separate project from using the AFDB
+release.
+
+The rest of this document is the evidence. The AFDB section carries the full
+confidence-gate measurements (101 gates across five scores) and the sampling
+caveats; the PDB, ModelArchive and BFMD sections carry the counts in the table
+above; `data/` holds every CSV, and "Reproducing the numbers" at the end lists the
+commands.
 
 ## AlphaFold DB
 
