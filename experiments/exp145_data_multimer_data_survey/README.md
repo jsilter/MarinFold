@@ -18,16 +18,17 @@ databases we already use, and in the other databases we could reach?**
 
 This is a survey, not an experiment. Nothing is trained, nothing is generated.
 The numbers below were read out of the databases' own APIs, FTP listings, and
-object stores on **2026-07-31**; where a number is an estimate rather than an
-exact count, it says so.
+object stores on **2026-07-31**, with the AFDB confidence-score profiling and the
+Foldseek run redone on **2026-08-02**; where a number is an estimate rather than
+an exact count, it says so.
 
 ## Headline
 
 **The AlphaFold DB acquired a multimer corpus this year and it is enormous.** A
 four-way EMBL-EBI / Google DeepMind / NVIDIA / Seoul National University release
 (announced March 2026, bulk data landing on the FTP site in June and July) holds
-roughly **21 M predicted homodimers and 7.6 M predicted heterodimers (about 29 M
-dimers and 48.8 TB)**. That is more predicted complexes than everything else in
+**21.5 M predicted homodimers and 7.6 M predicted heterodimers (about 29 M dimers
+and 48.8 TB)**. That is more predicted complexes than everything else in
 this report combined, by roughly two orders of magnitude. Every model is scored
 (ipTM, ipSAE, pDockQ, pDockQ2, LIS, clash counts) and cross-referenced to UniProt
 on both chains, so it can be filtered to a confident subset without re-running
@@ -112,106 +113,291 @@ orders, `pDockQ`, `pDockQ2` in both orders, `LIS`, `numberOfInteractions`,
 `N_clash_backbone`, `N_clash_heavyAtom`), plus UniProt accessions, taxon IDs and
 gene names for both partners.
 
+#### The five scores, and why they disagree
+
+Filtering this release means choosing a score before choosing a threshold, and
+that first choice turns out to matter more. The five are not five noisy estimates
+of one quantity; three of them are transformations of the network's own predicted
+aligned error, one is a fit to experimental agreement, and they were designed to
+fail in different places.
+
+- **ipTM** is AlphaFold-Multimer's own output: a predicted TM-score computed over
+  residue pairs that span the two chains. AlphaFold's guidance treats above 0.8 as
+  a confident interface and below 0.6 as probable failure. Its known weakness is
+  that it averages over *every* interchain pair, so a correctly predicted
+  interface hanging off a long disordered tail scores badly for a reason that has
+  nothing to do with the interface, and trimming the construct raises the score
+  without changing the prediction.
+- **pDockQ** ([Bryant et al. 2022](https://doi.org/10.1038/s41467-022-28865-w)) is
+  a sigmoid fitted to reproduce DockQ from two cheap quantities: the mean pLDDT of
+  interface residues and the log of the number of interface contacts. Its 0.23
+  threshold is inherited from DockQ, where 0.23 is the boundary of an acceptable
+  model. It is the only one of the five calibrated against experimentally
+  determined structures rather than derived from the network's own uncertainty,
+  and the only one whose value therefore carries an external meaning.
+- **pDockQ2** ([Zhu et al.
+  2023](https://academic.oup.com/bioinformatics/article/39/7/btad424/7219714))
+  replaces the contact count with the predicted aligned error of interface residue
+  pairs and scores each interface of a multimer separately, which makes it
+  directional: the release ships `pDockQ2_AB` and `pDockQ2_BA`.
+- **ipSAE** ([Dunbrack 2025](https://doi.org/10.1101/2025.02.10.637595)) is ipTM
+  with the averaging problem fixed. It keeps only residue pairs whose interchain
+  PAE is good, and it rescales the TM-score's `d0` by the number of residues that
+  survived that filter instead of by the length of the whole chain, so a small
+  well-predicted interface is no longer diluted by everything around it. The
+  release computes it at `ipSAE_PAE_cutoff = 10` and `ipSAE_dist_cutoff = 15`, and
+  ships the `d0chn` and `d0dom` variants beside the primary score. It is also
+  directional.
+- **LIS** ([Kim et al. 2024](https://doi.org/10.1101/2024.02.19.580970)) keeps
+  interchain residue pairs with PAE below 12 Å, inverts them onto a 0 to 1 scale
+  so that low error scores high, and averages. It deliberately ignores physical
+  proximity, which is what makes it the most permissive of the five here and the
+  one aimed at flexible interfaces that pDockQ's contact count would miss.
+
+Two of these are scores of a *complex* (ipTM, pDockQ) and three are scores of an
+*interface as seen from one chain* (pDockQ2, ipSAE, LIS in their AB and BA forms).
+That distinction is why the tables below report ipSAE twice.
+
 #### How much of it survives a confidence filter
 
 Measured with `profile_confidence.py`: 200 windows of 200 kB range-read from each
 metadata CSV, giving **143,142 homodimer rows (0.67% of the file) and 123,597
-heterodimer rows (1.6%)**. Every threshold, with per-window spread, is in
-`data/nvda_confidence_gates.csv`.
+heterodimer rows (1.6% of it)**. Cells give the pooled pass rate, the range across
+the 200 windows, and the pass rate scaled to the full file (21.5 M homodimers,
+7.6 M heterodimers). The per-window range is not a confidence interval; it is
+there because the rows are blocked by organism, which the next section takes
+apart. `ipSAE` takes the better of the two chain orders, matching what the
+release's own `max_ipSAE` column does, and `ipSAE both ways` requires both.
 
-**One gate applies to both sets, and it is the authors' own.** The heterodimer
-table ships a `passes_quality_threshold` column defined by
-`quality_ipsae_threshold = 0.6` and `quality_pdockq2_threshold = 0.23`; the
-homodimer table ships no verdict column at all. Recomputing that criterion from
-the raw score columns reproduces the declared verdict on **123,597 of 123,597
-heterodimer rows, zero disagreements in either direction**, so applying the same
-recomputation to the homodimers measures them by the release's own standard
-rather than by a proxy. That is the `authors' gate` row below.
-
-Cells are `pass rate · estimated complexes`, against 21.5 M homodimers and 7.6 M
-heterodimers.
-
-**Homodimers**
-
-| threshold | ipTM | pDockQ | pDockQ2 | ipSAE (max) | ipSAE (both) | LIS |
-|---|---|---|---|---|---|---|
-| 0.23 | 39.12% · 8.41 M | 32.06% · 6.89 M | 11.36% · 2.44 M | 22.22% · 4.77 M | 22.05% · 4.74 M | 23.17% · 4.98 M |
-| 0.3 | 29.54% · 6.35 M | 26.87% · 5.77 M | 10.13% · 2.18 M | 20.63% · 4.43 M | 20.49% · 4.40 M | 19.48% · 4.19 M |
-| 0.4 | 22.19% · 4.77 M | 21.23% · 4.56 M | 8.61% · 1.85 M | 18.26% · 3.92 M | 18.09% · 3.89 M | 14.20% · 3.05 M |
-| 0.5 | 17.00% · 3.65 M | 16.01% · 3.44 M | 7.27% · 1.56 M | 15.29% · 3.29 M | 15.14% · 3.25 M | 9.04% · 1.94 M |
-| 0.6 | 12.81% · 2.75 M | 10.45% · 2.25 M | 6.09% · 1.31 M | 12.29% · 2.64 M | 12.18% · 2.62 M | 4.29% · 921 k |
-| 0.7 | 9.21% · 1.98 M | 3.59% · 771 k | 4.84% · 1.04 M | 9.03% · 1.94 M | 8.94% · 1.92 M | 0.65% · 140 k |
-| 0.75 | 7.58% · 1.63 M | none | 4.09% · 879 k | 7.35% · 1.58 M | 7.28% · 1.56 M | 0.14% · 29 k |
-| 0.8 | 5.90% · 1.27 M | none | 3.30% · 709 k | 5.68% · 1.22 M | 5.61% · 1.21 M | 0.01% · 2 k |
-| 0.9 | 2.69% · 577 k | none | 1.02% · 220 k | 1.68% · 361 k | 1.65% · 356 k | none |
-
-**Heterodimers**
-
-| threshold | ipTM | pDockQ | pDockQ2 | ipSAE (max) | ipSAE (both) | LIS |
-|---|---|---|---|---|---|---|
-| 0.23 | 33.99% · 2.58 M | 17.32% · 1.32 M | 1.55% · 118 k | 5.37% · 408 k | 3.50% · 266 k | 6.23% · 473 k |
-| 0.3 | 18.52% · 1.41 M | 11.33% · 861 k | 1.22% · 93 k | 4.51% · 343 k | 2.92% · 222 k | 4.01% · 305 k |
-| 0.4 | 9.85% · 748 k | 6.30% · 479 k | 0.88% · 67 k | 3.46% · 263 k | 2.19% · 166 k | 2.04% · 155 k |
-| 0.5 | 5.76% · 437 k | 3.21% · 244 k | 0.60% · 46 k | 2.56% · 194 k | 1.54% · 117 k | 0.83% · 63 k |
-| 0.6 | 3.35% · 255 k | 1.33% · 101 k | 0.39% · 30 k | 1.75% · 133 k | 0.99% · 75 k | 0.26% · 19 k |
-| 0.7 | 1.76% · 134 k | 0.19% · 14 k | 0.23% · 18 k | 1.01% · 77 k | 0.48% · 36 k | 0.05% · 4 k |
-| 0.75 | 1.25% · 95 k | none | 0.16% · 12 k | 0.63% · 48 k | 0.26% · 19 k | 246 |
-| 0.8 | 0.75% · 57 k | none | 0.09% · 7 k | 0.34% · 26 k | 0.11% · 8 k | none |
-| 0.9 | 0.09% · 7 k | none | 0.02% · 1 k | 0.01% · 860 | 307 | none |
-
-`ipSAE (max)` takes the better of the two chain orders, which is what the
-release's own `max_ipSAE` column does; `ipSAE (both)` requires both. LIS at its
-own published 0.203 cutoff passes 24.67% of homodimers (5.30 M) and 7.37% of
-heterodimers (560 k). The two combined gates:
-
-| Gate | homodimers | heterodimers |
+| Confidence gate | homodimers | heterodimers |
 |---|---|---|
-| **authors' gate** (ipSAE ≥ 0.6 and pDockQ2 ≥ 0.23) | 9.13% · **1.96 M** | 0.92% · **70 k** |
-| declared `passes_quality_threshold` | (column absent) | 0.92% · 70 k |
-| ipTM ≥ 0.8 and zero backbone clashes | 5.63% · 1.21 M | 0.52% · 39 k |
+| ipTM ≥ 0.23 | 39.12% (range 4.1 to 98.6) → 8.41 M | 33.99% (range 10.9 to 75.2) → 2.58 M |
+| ipTM ≥ 0.3 | 29.54% (range 2.6 to 98.3) → 6.35 M | 18.52% (range 4.9 to 35.3) → 1.41 M |
+| ipTM ≥ 0.4 | 22.19% (range 0.5 to 98.1) → 4.77 M | 9.85% (range 2.6 to 18.2) → 748 k |
+| ipTM ≥ 0.5 | 17.00% (range 0.2 to 98.1) → 3.65 M | 5.76% (range 0.9 to 11.7) → 437 k |
+| ipTM ≥ 0.6 | 12.81% (range 0.1 to 98.1) → 2.75 M | 3.35% (range 0.3 to 8.8) → 255 k |
+| ipTM ≥ 0.7 | 9.21% (range 0.1 to 98.1) → 1.98 M | 1.76% (range 0.0 to 7.1) → 134 k |
+| ipTM ≥ 0.75 | 7.58% (range 0.0 to 98.0) → 1.63 M | 1.25% (range 0.0 to 6.8) → 95 k |
+| **ipTM ≥ 0.8** | 5.90% (range 0.0 to 98.0) → 1.27 M | 0.75% (range 0.0 to 4.1) → 57 k |
+| ipTM ≥ 0.9 | 2.69% (range 0.0 to 96.9) → 577 k | 0.09% (range 0.0 to 1.6) → 7 k |
+| **pDockQ ≥ 0.23** | 32.06% (range 2.5 to 98.1) → 6.89 M | 17.32% (range 0.2 to 48.3) → 1.32 M |
+| pDockQ ≥ 0.3 | 26.87% (range 1.2 to 98.1) → 5.77 M | 11.33% (range 0.2 to 37.9) → 861 k |
+| pDockQ ≥ 0.4 | 21.23% (range 0.6 to 98.1) → 4.56 M | 6.30% (range 0.0 to 25.1) → 479 k |
+| pDockQ ≥ 0.5 | 16.01% (range 0.2 to 98.0) → 3.44 M | 3.21% (range 0.0 to 17.0) → 244 k |
+| pDockQ ≥ 0.6 | 10.45% (range 0.1 to 98.0) → 2.25 M | 1.33% (range 0.0 to 6.6) → 101 k |
+| pDockQ ≥ 0.7 | 3.59% (range 0.0 to 98.0) → 771 k | 0.19% (range 0.0 to 1.9) → 14 k |
+| pDockQ ≥ 0.75, 0.8, 0.9 | none (see saturation, below) | none |
+| **pDockQ2 ≥ 0.23** | 11.36% (range 0.1 to 98.0) → 2.44 M | 1.55% (range 0.0 to 5.3) → 118 k |
+| pDockQ2 ≥ 0.3 | 10.13% (range 0.1 to 98.0) → 2.18 M | 1.22% (range 0.0 to 4.9) → 93 k |
+| pDockQ2 ≥ 0.4 | 8.61% (range 0.0 to 98.0) → 1.85 M | 0.88% (range 0.0 to 4.0) → 67 k |
+| pDockQ2 ≥ 0.5 | 7.27% (range 0.0 to 98.0) → 1.56 M | 0.60% (range 0.0 to 3.7) → 46 k |
+| pDockQ2 ≥ 0.6 | 6.09% (range 0.0 to 97.7) → 1.31 M | 0.39% (range 0.0 to 2.8) → 30 k |
+| pDockQ2 ≥ 0.7 | 4.84% (range 0.0 to 96.4) → 1.04 M | 0.23% (range 0.0 to 2.1) → 18 k |
+| pDockQ2 ≥ 0.75 | 4.09% (range 0.0 to 95.2) → 879 k | 0.16% (range 0.0 to 1.6) → 12 k |
+| pDockQ2 ≥ 0.8 | 3.30% (range 0.0 to 92.7) → 709 k | 0.09% (range 0.0 to 1.4) → 7 k |
+| pDockQ2 ≥ 0.9 | 1.02% (range 0.0 to 17.6) → 220 k | 0.02% (range 0.0 to 1.0) → 1 k |
+| ipSAE ≥ 0.23 | 22.22% (range 0.2 to 98.3) → 4.77 M | 5.37% (range 1.0 to 13.9) → 408 k |
+| ipSAE ≥ 0.3 | 20.63% (range 0.1 to 98.1) → 4.43 M | 4.51% (range 0.8 to 13.2) → 343 k |
+| ipSAE ≥ 0.4 | 18.26% (range 0.1 to 98.1) → 3.92 M | 3.46% (range 0.3 to 11.3) → 263 k |
+| ipSAE ≥ 0.5 | 15.29% (range 0.1 to 98.1) → 3.29 M | 2.56% (range 0.3 to 7.7) → 194 k |
+| **ipSAE ≥ 0.6** | 12.29% (range 0.1 to 98.0) → 2.64 M | 1.75% (range 0.0 to 7.0) → 133 k |
+| ipSAE ≥ 0.7 | 9.03% (range 0.1 to 98.0) → 1.94 M | 1.01% (range 0.0 to 4.1) → 77 k |
+| **ipSAE ≥ 0.75** | 7.35% (range 0.1 to 98.0) → 1.58 M | 0.63% (range 0.0 to 3.3) → 48 k |
+| ipSAE ≥ 0.8 | 5.68% (range 0.0 to 98.0) → 1.22 M | 0.34% (range 0.0 to 2.0) → 26 k |
+| ipSAE ≥ 0.9 | 1.68% (range 0.0 to 96.9) → 361 k | 0.01% (range 0.0 to 0.5) → 860 |
+| ipSAE both ways ≥ 0.23 | 22.05% (range 0.1 to 98.3) → 4.74 M | 3.50% (range 0.3 to 11.1) → 266 k |
+| ipSAE both ways ≥ 0.3 | 20.49% (range 0.1 to 98.1) → 4.40 M | 2.92% (range 0.2 to 10.8) → 222 k |
+| ipSAE both ways ≥ 0.4 | 18.09% (range 0.1 to 98.1) → 3.89 M | 2.19% (range 0.0 to 9.0) → 166 k |
+| ipSAE both ways ≥ 0.5 | 15.14% (range 0.1 to 98.1) → 3.25 M | 1.54% (range 0.0 to 5.4) → 117 k |
+| ipSAE both ways ≥ 0.6 | 12.18% (range 0.1 to 98.0) → 2.62 M | 0.99% (range 0.0 to 4.0) → 75 k |
+| ipSAE both ways ≥ 0.7 | 8.94% (range 0.1 to 98.0) → 1.92 M | 0.48% (range 0.0 to 2.1) → 36 k |
+| ipSAE both ways ≥ 0.75 | 7.28% (range 0.1 to 98.0) → 1.56 M | 0.26% (range 0.0 to 1.6) → 19 k |
+| ipSAE both ways ≥ 0.8 | 5.61% (range 0.0 to 98.0) → 1.21 M | 0.11% (range 0.0 to 1.4) → 8 k |
+| ipSAE both ways ≥ 0.9 | 1.65% (range 0.0 to 96.9) → 356 k | 0.00% (range 0.0 to 0.2) → 307 |
+| **LIS ≥ 0.203** | 24.67% (range 1.5 to 98.3) → 5.30 M | 7.37% (range 2.9 to 15.6) → 560 k |
+| LIS ≥ 0.23 | 23.17% (range 1.4 to 98.1) → 4.98 M | 6.23% (range 1.9 to 14.7) → 473 k |
+| LIS ≥ 0.3 | 19.48% (range 0.4 to 98.1) → 4.19 M | 4.01% (range 0.5 to 11.3) → 305 k |
+| LIS ≥ 0.4 | 14.20% (range 0.2 to 98.0) → 3.05 M | 2.04% (range 0.2 to 7.6) → 155 k |
+| LIS ≥ 0.5 | 9.04% (range 0.2 to 98.0) → 1.94 M | 0.83% (range 0.0 to 3.8) → 63 k |
+| LIS ≥ 0.6 | 4.29% (range 0.0 to 98.0) → 921 k | 0.26% (range 0.0 to 2.3) → 19 k |
+| LIS ≥ 0.7 | 0.65% (range 0.0 to 5.8) → 140 k | 0.05% (range 0.0 to 1.5) → 4 k |
+| LIS ≥ 0.75 | 0.14% (range 0.0 to 1.6) → 29 k | 0.00% (range 0.0 to 0.2) → 246 |
+| LIS ≥ 0.8 | 0.01% (range 0.0 to 0.4) → 2 k | none |
+| **authors' gate** (ipSAE ≥ 0.6 and pDockQ2 ≥ 0.23) | 9.13% (range 0.1 to 98.0) → **1.96 M** | 0.92% (range 0.0 to 4.7) → **70 k** |
+| declared `passes_quality_threshold` | (column absent) | 0.92% (range 0.0 to 4.7) → 70 k |
+| ipTM ≥ 0.8 and zero backbone clashes | 5.63% (range 0.0 to 98.0) → 1.21 M | 0.52% (range 0.0 to 3.6) → 39 k |
 
-Five things in these tables matter for planning:
+Bold rows are each score's own published threshold, plus the release's combined
+gate. The rest of this section is what the table means.
 
-- **Heterodimers are harder by roughly an order of magnitude at every threshold.**
-  ipTM ≥ 0.8 passes 5.90% of homodimers and 0.75% of heterodimers; the authors'
-  gate passes 9.13% and 0.92%. This is expected rather than a defect: a homodimer
-  interface is constrained by symmetry between two copies of one fold, while an
-  arbitrary heterodimer pairing may not interact at all, and with an ipTM
-  early-stopping threshold of 0.1 the pipeline deliberately keeps the speculative
-  pairings instead of discarding them.
-- **The metrics disagree with each other by up to 10x.** At threshold 0.5 the
-  heterodimer yield is 437 k by ipTM, 244 k by pDockQ, 194 k by ipSAE, and 46 k by
-  pDockQ2. Which score you filter on is a bigger decision than where you put the
-  cut, and pDockQ2 is the strictest everywhere.
-- **A pDockQ gate above 0.7 selects nothing, for a reason that is not about these
-  structures.** pDockQ is a fitted sigmoid whose upper asymptote sits below 0.75;
-  the largest value anywhere in the two samples is 0.742 (homodimer) and 0.737
-  (heterodimer). Anyone porting a "pDockQ ≥ 0.8" rule from elsewhere will silently
-  get an empty set.
-- **Requiring ipSAE in both chain orders is free on homodimers and halves the
-  heterodimers.** ipSAE is directional. On homodimers max and min are nearly the
-  same (15.29% against 15.14% at 0.5) because the complex is symmetric; on
-  heterodimers at 0.75 the permissive reading gives 48 k and the strict one 19 k.
-- **The scores are heavily zero-inflated, so percentiles mislead.** 59.4% of
-  homodimers and 76.7% of heterodimers score ipSAE exactly 0. Heterodimer ipSAE
-  has a median of 0 and a p90 of 0.020; its p99 is 0.702. Full distributions in
-  `data/nvda_confidence_quantiles.csv`:
+#### The release's own gate can be applied to both sets
 
-| | ipTM | pDockQ | pDockQ2 | ipSAE (max) | LIS |
+The last three rows are the important ones, and the middle of the three is a
+check rather than a result.
+
+The heterodimer table ships a verdict column, `passes_quality_threshold`, together
+with the two constants that define it: `quality_ipsae_threshold = 0.6` and
+`quality_pdockq2_threshold = 0.23`. The homodimer table ships no verdict column at
+all, which is why an earlier version of this report fell back on ipTM ≥ 0.8 as a
+proxy and said so.
+
+The proxy is unnecessary. Recomputing the criterion from the raw `ipSAE_AB`,
+`ipSAE_BA`, `pDockQ2_AB` and `pDockQ2_BA` columns reproduces the declared verdict
+on **123,597 of 123,597 heterodimer rows, with zero disagreements in either
+direction** (`profile_confidence.py` checks this on every run and records the
+result in `data/nvda_confidence_sampling.json`). Both directions matter: no row is
+declared true and recomputed false, and none the reverse. So the recomputation is
+the authors' gate rather than an approximation of it, and applying it to the
+homodimer scores measures that set by the release's own standard:
+
+| | pass rate | complexes |
+|---|---|---|
+| homodimers under the authors' gate | 9.13% | **1.96 M** |
+| heterodimers under the authors' gate | 0.92% | **70 k** |
+
+The homodimer number is worth comparing against the announcement, which claims
+1.7 M high-confidence homodimers without publishing the criterion behind it. The
+authors' heterodimer gate gives 1.96 M and an ipTM ≥ 0.8 cut gives 1.27 M, so
+1.7 M sits between the two. That is consistent with the announced figure coming
+from something close to the heterodimer gate, and it is the reason this report
+quotes 1.96 M with the gate named rather than quoting 1.7 M as though it were
+measured here.
+
+#### Heterodimers are harder by roughly an order of magnitude
+
+At every threshold of every score, the heterodimer pass rate is far below the
+homodimer one, and the gap widens as the threshold rises. At ipTM ≥ 0.5 the ratio
+is 3:1 (17.00% against 5.76%); at ipTM ≥ 0.8 it is 8:1 (5.90% against 0.75%); at
+ipTM ≥ 0.9 it is 30:1 (2.69% against 0.09%). Under the authors' gate it is 10:1.
+
+This is a property of the task, not a defect in the pipeline. A homodimer is two
+copies of one fold, so the model has to place a chain against something whose
+structure it already predicted well, and the answer is usually constrained by
+symmetry. A heterodimer candidate is a pair drawn from an interaction screen, and
+many of those pairs do not form a complex at all; there is no correct answer for
+the model to find. The pipeline's ipTM early-stopping threshold of **0.1** is the
+tell: rather than discarding a pairing that looks hopeless after the first pass,
+it stops recycling and writes the model out anyway. The 7.6 M heterodimers are
+therefore best read as a screen with its negatives retained, not as 7.6 M
+complexes, and the 70 k that pass the gate are the actual claim.
+
+For us that reframes what the heterodimer half of this release is. It is not a
+7.6 M training corpus. It is a 70 k training corpus shipped alongside 7.5 M
+labelled negatives, and the negatives may be the more unusual asset: nothing else
+in this survey offers a large set of protein pairs that a good predictor examined
+and judged not to interact.
+
+#### Which score you filter on changes the answer by 10x
+
+Hold the threshold at 0.5 and vary only the score:
+
+| score at ≥ 0.5 | homodimers | heterodimers |
+|---|---|---|
+| ipTM | 3.65 M | 437 k |
+| pDockQ | 3.44 M | 244 k |
+| ipSAE | 3.29 M | 194 k |
+| LIS | 1.94 M | 63 k |
+| pDockQ2 | 1.56 M | 46 k |
+
+A factor of 2.3 on homodimers and **9.5 on heterodimers**, from a decision that is
+easy to make without noticing. The ordering is not fixed across the grid either:
+pDockQ2 is the strictest score from 0.23 through 0.5, but at 0.6 and above LIS
+overtakes it (homodimers 4.29% against 6.09%), and pDockQ's saturation drops it
+from second-most-permissive to fourth by 0.7.
+
+What separates the scores is mostly how they treat a *bad* model, not how they
+rank good ones. ipTM never returns zero anywhere in either sample (its 5th
+percentile is 0.09 for homodimers and 0.084 for heterodimers), so a pairing with
+no recognisable interface still lands somewhere around 0.1 to 0.3 and a cut at 0.5
+is only a few tenths above the noise floor. ipSAE and LIS return **exactly** zero
+when their PAE filter retains no interchain residue pairs, which happens for 59.4%
+and 51.6% of homodimers and 76.7% and 67.4% of heterodimers. Those scores
+effectively answer a prior question, "is there an interface here at all", before
+answering "how good is it".
+
+That difference is what the release's combined gate exploits. `ipSAE ≥ 0.6` alone
+passes 1.75% of heterodimers and `pDockQ2 ≥ 0.23` alone passes 1.55%; if the two
+ranked models identically the conjunction would equal the stricter one, 1.55%, and
+if they were statistically independent it would be 0.027%. The measured
+conjunction is **0.92%**, about 60% of the stricter score alone. So the two
+agree substantially about which heterodimers are good while disagreeing about how
+many, and requiring both is a meaningful tightening rather than a redundant one.
+
+#### A pDockQ gate above 0.75 is empty by construction
+
+`pDockQ ≥ 0.75` returns nothing, and neither does anything above it. This is not a
+statement about the release. pDockQ is a fitted sigmoid whose upper asymptote sits
+below 0.75, so no structure anywhere can score higher: the largest value in the
+143,142 homodimer rows is **0.742** and in the 123,597 heterodimer rows **0.737**.
+
+This is worth flagging because "pDockQ ≥ 0.8" is the sort of threshold that gets
+carried over from a filter written for a different score. It would return an empty
+set, silently, with no error and no warning. The equivalent strict pDockQ cut is
+0.7, which passes 3.59% of homodimers and 0.19% of heterodimers.
+
+#### Directionality costs nothing on homodimers and half the heterodimers
+
+ipSAE is computed once per chain order, and the release ships both. Taking the
+better of the two (the `ipSAE` rows) against requiring both (the `ipSAE both ways`
+rows):
+
+| | homodimers | heterodimers |
+|---|---|---|
+| ipSAE ≥ 0.5, better direction | 15.29% | 2.56% |
+| ipSAE ≥ 0.5, both directions | 15.14% | 1.54% |
+| ipSAE ≥ 0.75, better direction | 7.35% | 0.63% |
+| ipSAE ≥ 0.75, both directions | 7.28% | 0.26% |
+
+On homodimers the two readings are within a percent of each other at every
+threshold, which is what symmetry predicts: the two chains are the same sequence,
+so the interface looks the same from either side. On heterodimers the strict
+reading removes **40% of the survivors at 0.5 and about 60% at 0.75**. Those are the
+models where one chain is confidently placed against the other but not the
+reverse, which is the signature of a small or ill-defined interface, and they are
+exactly the models a training set should probably not include. Note that the
+release's own gate uses the permissive reading, so `passes_quality_threshold`
+retains them.
+
+#### The scores are zero-inflated, so percentiles mislead
+
+A failed interface does not score low on ipSAE and LIS, it scores exactly zero,
+because the PAE filter retains no residue pairs at all and there is nothing left
+to average. That makes the median uninformative for three of the five scores:
+
+| | ipTM | pDockQ | pDockQ2 | ipSAE | LIS |
 |---|---|---|---|---|---|
 | homodimer median / p90 / max | 0.19 / 0.67 / 0.97 | 0.097 / 0.607 / 0.742 | 0.010 / 0.309 / 0.957 | 0.00 / 0.671 / 0.950 | 0.00 / 0.480 / 0.828 |
 | heterodimer median / p90 / max | 0.194 / 0.398 / 0.964 | 0.085 / 0.322 / 0.737 | 0.010 / 0.018 / 0.941 | 0.00 / 0.020 / 0.933 | 0.00 / 0.156 / 0.767 |
-| fraction scoring exactly 0 (homo / hetero) | 0% / 0% | 1.2% / 7.3% | 1.2% / 7.3% | 59.4% / 76.7% | 51.6% / 67.4% |
+| fraction scoring exactly 0, homo / hetero | 0% / 0% | 1.2% / 7.3% | 1.2% / 7.3% | **59.4% / 76.7%** | 51.6% / 67.4% |
+
+Heterodimer ipSAE has a median of 0, a p90 of 0.020 and a p99 of 0.702: the
+distribution is a spike at zero, a long flat stretch of near-zero values, and a
+thin tail of real interfaces starting somewhere in the last two percent. That
+shape is why the pass rates fall so steeply between 0.23 and 0.3 and then so
+gently afterwards, and it is why a mean or a median of these columns tells you
+almost nothing. Threshold counts, which is what the big table gives, are the only
+honest summary. Full distributions in `data/nvda_confidence_quantiles.csv`.
 
 #### Why these totals are order-of-magnitude, not three significant figures
 
-Rows are blocked by organism, so a byte window is a cluster sample rather than
-700 independent draws. The per-window record in `data/nvda_confidence_windows.csv`
-shows how severe that is: in **176 of the 200 homodimer windows a single organism
-accounts for more than 90% of the rows** (1,200 organisms across the whole
-sample), against 50 of 200 windows for heterodimers.
+Sampling by byte offset works here only because the row format is near-fixed-width
+and nothing about a row's *contents* correlates with its position inside an
+organism's block. What does correlate, strongly, is which organism's block the
+window lands in. Rows are grouped by organism, so a 200 kB window is not 700
+independent draws; it is one draw of an organism plus 700 near-replicates of that
+organism's difficulty.
 
-So the pooled rates carry real uncertainty, much more for homodimers:
+`profile_confidence.py` therefore records every window separately, and
+`data/nvda_confidence_windows.csv` quantifies how severe the grouping is: in **176
+of the 200 homodimer windows a single organism accounts for more than 90% of the
+rows**, against 50 of 200 for heterodimers, with 1,200 distinct organisms across
+the homodimer sample. That difference between the two files is itself informative:
+the heterodimer set is organised as within-organism interaction screens that are
+large enough to span many windows, so a window is more likely to sit in the middle
+of one screen than at a boundary.
+
+The consequence is that the pooled rate is a point estimate with a wide and
+asymmetric spread behind it, much wider for homodimers:
 
 | | pooled | window median | window range |
 |---|---|---|---|
@@ -220,17 +406,34 @@ So the pooled rates carry real uncertainty, much more for homodimers:
 | heterodimer, authors' gate | 0.92% | 0.67% | 0.0% to 4.7% |
 | heterodimer, ipTM ≥ 0.8 | 0.75% | 0.63% | 0.0% to 4.1% |
 
-The 98% homodimer window is a real feature of the data rather than a parsing
-error. It lands inside a run of one well-predicted enzyme (`hemL1`,
-glutamate-1-semialdehyde aminomutase, a genuine obligate homodimer) repeated
-across hundreds of bacterial strains at consecutive byte offsets, every copy
-scoring ipTM 0.95.
+The pooled rate sits above the window median in all four rows, which says a
+minority of high-scoring windows is pulling the mean up. The extreme case is worth
+understanding rather than discarding, because it is a real feature of the data and
+not a parsing error: one homodimer window scored **98%** against a 7.1% median. It
+lands inside a run of `hemL1` (glutamate-1-semialdehyde aminomutase, a genuine
+obligate homodimer) repeated across hundreds of bacterial strains at consecutive
+byte offsets, every copy scoring ipTM 0.95. Inspecting the window shows five
+consecutive rows with the same gene name and pDockQ values agreeing to four
+decimal places, which is what near-identical strain sequences produce.
+
+That window contributes 0.98/200 = 0.49 percentage points to the pooled homodimer
+figure of 9.13%, so it accounts for about 5% of the total and dropping it would
+not change the conclusion. The right reading of the whole table is therefore:
+**heterodimer totals are good to roughly ±30%, homodimer totals to a factor of
+two.** Both are far more precise than the decisions they inform, which are of the
+form "is this 70 k or 7 M".
 
 #### Distinct model IDs are not distinct proteins
 
-That `hemL1` run points at something the headline counts hide. Every row does
-carry its own UniProt accession, but UniProt assigns one accession per strain, so
-a conserved bacterial protein enters the set once per sequenced strain:
+That `hemL1` run is not just a sampling nuisance. It points at something the
+headline counts hide, and it changes what "1.96 M confident homodimers" is worth.
+
+The homodimer set is built from UniProt, and UniProt assigns **one accession per
+strain**. A conserved bacterial enzyme sequenced in three hundred strains is three
+hundred accessions, three hundred predictions, and three hundred rows in the
+metadata CSV, all of them modelling what is nearly the same protein and producing
+what is nearly the same structure. Counting distinct model IDs counts the
+sequencing effort, not the structural diversity.
 
 | homodimer sample | |
 |---|---|
@@ -242,15 +445,31 @@ a conserved bacterial protein enters the set once per sequenced strain:
 | longest run of one gene name at consecutive offsets | 767 |
 | rows sitting in a run of 2 or more identical gene names | 15.8% |
 
-Under the authors' gate, the 13,063 confident homodimers in the sample carry
-9,964 distinct gene names, so name-level deduplication alone removes about 24% of
-them. Heterodimers are far less repetitive: 123,597 rows give 116,284 distinct
-gene pairs (94.1%), and the 1,141 confident ones give 1,079 pairs (94.6%).
+The accession column is perfectly unique and tells you nothing. Gene names
+collapse the same rows by a quarter. The 767-long run is one gene repeated 767
+times in a row, and 15.8% of all sampled rows sit in a run of at least two.
 
-Gene name is a loose key (`rplC` in *E. coli* and in *S. aureus* are homologs,
-not copies of one protein), so these numbers bound the redundancy from one side
-only. The structural count will be **lower** than the gene-distinct count, which
-is what the Foldseek-Multimer run below exists to measure.
+Under the authors' gate the picture barely improves: the 13,063 confident
+homodimers in the sample carry 9,964 distinct gene names, so name-level
+deduplication alone removes about 24% of them, essentially the same fraction as in
+the unfiltered set. Confidence and redundancy are independent here, which makes
+sense, since a protein that folds well in one strain folds well in all of them.
+
+Heterodimers are far less repetitive: 123,597 rows give 116,284 distinct gene
+pairs (94.1%), and the 1,141 confident ones give 1,079 pairs (94.6%). Requiring
+two specific proteins to co-occur is a much stronger constraint than naming one,
+so the pair space is sparser by construction.
+
+Two warnings about reading these numbers. Gene name is a **loose** key across
+organisms: `rplC` in *E. coli* and `rplC` in *S. aureus* are homologs with
+similar folds, not copies of one protein, so collapsing on the name alone would
+merge things that are genuinely distinct. It is also a **weak** key, because it
+misses everything that is structurally redundant under a different name, which the
+Sm-ring cluster in the Foldseek section below shows is common. The two errors run
+in opposite directions, but the second dominates: the structural count will end up
+**lower** than the 74.9% gene-distinct figure, not higher. Measuring how much
+lower is exactly what a full Foldseek-Multimer run over the confident slice would
+settle, and it is the single most useful follow-up to this survey.
 
 #### Coverage
 
@@ -583,8 +802,16 @@ Two scripts, both capped and both cheap:
 - **`smoke_test_foldseek_multimer.py`** runs `easy-multimercluster` and
   `easy-multimersearch` over that sample.
 
+Why the multimer commands and not `easy-cluster`: `easy-cluster` clusters
+*chains*, so two complexes assembled from the same two folds land together no
+matter how differently the chains are arranged against each other. Redundancy that
+matters for training is a property of the interface, which is what
+`easy-multimercluster` scores through `--multimer-tm-threshold`,
+`--chain-tm-threshold` and `--interface-lddt-threshold`.
+
 Foldseek read all 90 chains from the 45 ModelCIF files with no parse warnings, so
-AFDB complex files need no conversion. Both commands finished in about 3 seconds.
+AFDB complex files need no conversion step, no PDB rewrite and no chain splitting.
+Both commands finished in about 3 seconds.
 
 | | |
 |---|---|
@@ -595,8 +822,11 @@ AFDB complex files need no conversion. Both commands finished in about 3 seconds
 | pairs with multimer TM ≥ 0.5 | 7 |
 | pairs where both chains aligned | 199 |
 
-A 1.12x reduction is what a random draw of 45 complexes from a 29 M set should
-give, so the number that matters is what the four multi-member clusters contain:
+The 1.12x reduction is not the result. Forty-five complexes drawn at random from a
+29 M set should be almost entirely unrelated to each other, and they mostly are;
+finding any structure at all in a sample this small is the surprise. What the four
+multi-member clusters contain is the finding, and each one fails a different
+deduplication strategy:
 
 - **bma-lsm-6/bma-lsm-5.1, bma-snr-7/bma-snr-5, bma-lsm-6/bma-snr-6** (*Brugia
   malayi*, tax 6279), the 3-member cluster, multimer TM 0.799 to 0.819. All six
@@ -612,27 +842,57 @@ give, so the number that matters is what the four multi-member clusters contain:
   chains aligned. A sorting-nexin BAR domain dimerises into a crescent, and a
   soybean heterodimeric pair reproduces the same interface.
 
-Three lessons from four clusters. **The Sm-ring case defeats sequence-level
-filtering**: those three complexes carry six different gene names, so a filter on
-gene pairs would have kept all three as distinct training examples, exactly the
-lesson exp41 hit on monomers (65 of 99 FoldBench structures overlapped training
-structurally while sitting below 30% sequence identity). **The SNX4 case means the
-homodimer and heterodimer sets must be deduplicated together**, not separately:
-they share interfaces across the two files and across a fish and a legume.
+Three lessons follow, and they compound.
 
-And **the search report is not the clustering**. Seven pairs scored multimer
-TM ≥ 0.5 but only six of them formed clusters; the seventh (a soybean
-LOC100805119/LOC547737 pair against human STK38L/MOB1A, TM 0.519) aligned a
-single chain of each, so it is a fold-level match rather than an interface match
-and `easy-multimercluster` correctly declined to merge them. Filter on chain
-coverage, not on the TM-score alone.
+**Sequence-level filtering does not work here.** The Sm-ring cluster is the proof.
+Those three complexes carry six different gene names across three unrelated-looking
+pairs, so any filter keyed on gene pairs, and probably any filter keyed on sequence
+identity between partners, keeps all three as distinct training examples. They are
+three pairwise slices of one heptameric ring, and the interface is the same
+interface. This is the multimer version of what exp41 found on monomers: 65 of 99
+FoldBench structures overlapped training structurally while sitting below 30%
+sequence identity. Ring-forming and filament-forming complexes make it worse than
+the monomer case, because a single assembly generates many valid-looking pairs.
 
-One trap worth recording, because it fails silently. Passing the structure files as
-separate argv entries instead of as a directory makes Foldseek treat all but the
-last one or two as something else and **still exit 0**; the first run of this smoke
-test reported a clean clustering of 2 chains as if it had covered all 45 structures.
-`assert_all_chains_ingested()` now checks the reported database size against
-2 × the number of files and raises.
+**The two files have to be deduplicated together.** The SNX4 cluster pairs a
+homodimer from `homodimers/` with a heterodimer from `heterodimers/`, across a
+fish and a legume, at multimer TM 0.62 with both chains aligned. Processing the
+21.5 M homodimers and the 7.6 M heterodimers as separate jobs, which is the
+obvious way to split the work given that they are separate directories with
+separate metadata files, would leave that class of redundancy in place. Any
+pipeline design that shards by file has to reconcile across shards at the end.
+
+**The search report is not the clustering, and the difference is chain coverage.**
+Seven pairs scored multimer TM ≥ 0.5 but only six formed clusters. The seventh is
+a soybean LOC100805119/LOC547737 pair against human STK38L/MOB1A at TM 0.519,
+where Foldseek aligned chain A of one against chain A of the other and nothing
+else. One chain matching is a fold-level match, not an interface match, and
+`easy-multimercluster` correctly declined to merge them. The
+`both_chains_aligned` column in `data/foldseek_multimer_smoke_hits.csv` is what
+separates the two cases: 199 of the 650 reported pairs align both chains, and only
+those are candidates for interface redundancy. Filtering a search report on the
+TM-score alone would have produced a wrong answer here.
+
+One trap worth recording, because it fails silently and produces a plausible
+answer. `easy-multimercluster` takes a *directory* of structures. Passing the 45
+files as separate argv entries instead makes Foldseek consume all but the last one
+or two as something else, and it **still exits 0**: the first run of this smoke
+test clustered 2 chains and reported a clean result that read exactly like a
+successful run over all 45 structures. `easy-multimersearch` fails the same way in
+a different shape, silently splitting a file list into 44 queries against 1 target.
+
+`assert_all_chains_ingested()` now parses Foldseek's own `Query database size`
+line out of the log and compares it against 2 × the number of input files, raising
+if they differ. It also raises when the log line is missing rather than passing
+vacuously, which matters because a Foldseek version change could remove it. The
+guard was tested against three failure modes: an under-ingest, a zero-structure
+sample, and a log with the line absent.
+
+Scaling this to the confident slice is the obvious next step and it is not free.
+The 45-structure run says nothing useful about ~2 M, where the cost is dominated
+by `createdb` over the whole set and by the ~230 GB download that has to precede
+it. What the smoke test does establish is that no format conversion sits in
+between, which was the open question.
 
 ## Conclusion
 
