@@ -4,3 +4,13 @@
 # derived result live in data/ and are committed.
 sample/
 __pycache__/
+
+# Curation bulk artifacts. Regenerate with the curate_*.py scripts, or pull from
+# the HF bucket (data/multimer_curation/). Every summary JSON and log the scripts
+# emit is small and IS committed, so the numbers stay reviewable without the
+# multi-hundred-MB inputs.
+data/curation/subunit_shards/
+data/curation/mmseqs_work/
+data/curation/*.csv.gz
+data/curation/val_monomers.fasta
+data/curation/val_monomers.csv
