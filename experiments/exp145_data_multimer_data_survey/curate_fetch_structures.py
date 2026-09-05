@@ -114,7 +114,12 @@ class Destination:
         if not self.is_s3:
             (Path(self.root) / name).write_bytes(payload)
             return
-        with self.fs.open_output_stream(f"{self.root}/{name}") as handle:
+        # compression=None is required rather than merely tidy: pyarrow defaults to
+        # "detect" and gzips any object whose name ends in .gz. Our shard names do
+        # not, but a future caller passing one would get a doubly-compressed object
+        # that reads back as garbage. The read side has the mirror-image trap: it
+        # silently gunzips on open, which is what broke the first EC2 smoke test.
+        with self.fs.open_output_stream(f"{self.root}/{name}", compression=None) as handle:
             handle.write(payload)
 
 

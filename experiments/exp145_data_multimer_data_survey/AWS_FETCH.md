@@ -37,8 +37,10 @@ flags exist for the full-corpus case and are left at their defaults here.
   `marinfold-exp91-usw2` bucket. Ingress from EBI is free from anywhere, so the
   region to pick is the one the data will be *read* from later, and exp91's data
   is already there.
-- **IAM**: attach an instance role with `s3:PutObject`, `s3:GetObject` and
-  `s3:ListBucket` on the destination prefix. **Do not put credentials in the
+- **IAM**: `--iam-instance-profile Name=marinfold-exp91-instance-profile`. This
+  account cannot discover it (`iam:ListInstanceProfiles` is denied for
+  `user/external-jsilterra`); the name comes from exp91's untracked
+  `run_upload.local.sh`, which is why it is written down here. **Do not put credentials in the
   environment.** exp91's short-lived CloudShell STS creds expire in ~15 minutes,
   which will not survive a 21-hour run; the instance role auto-refreshes and is
   the only thing that works here.
@@ -60,6 +62,33 @@ git clone --depth 1 --branch exp145/multimer-data-survey \
     https://github.com/Open-Athena/MarinFold.git
 cd MarinFold/experiments/exp145_data_multimer_data_survey
 ```
+
+## Verified end to end on 2026-09-05
+
+Instance `i-0792976cea76c8882`, `c7i.large` in us-west-2a, launched with
+`ec2_smoke_userdata.sh` as user-data and no SSH key. It staged the scripts from
+S3 with the instance role, fetched 25 val complexes (25/25 ok, 7.79 files/s),
+wrote a 3.07 MB tar and its sidecar, read a member back to
+`data_AF-0000000065760132-model_v1` with `chains: ['A', 'B']`, published its log
+and a `_DONE_rc0` marker, and terminated itself.
+
+Launch command, AMI `ami-07b3d2f97d89e29a4` (Ubuntu 22.04, us-west-2):
+
+```bash
+aws ec2 run-instances \
+    --image-id ami-07b3d2f97d89e29a4 --instance-type c7i.large --count 1 \
+    --subnet-id subnet-0a393c46ff06d81c3 \
+    --iam-instance-profile Name=marinfold-exp91-instance-profile \
+    --instance-initiated-shutdown-behavior terminate \
+    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=20,VolumeType=gp3,DeleteOnTermination=true}' \
+    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=exp145-fetch}]' \
+    --user-data file://ec2_smoke_userdata.sh
+```
+
+No key pair exists on this account, so everything runs from user-data and the
+result is read from S3. `_DONE_rc<N>` carries the exit code; an instance that
+terminates without a marker died before publishing, which is a failure to
+investigate rather than a slow run.
 
 ## Step 1: smoke test one shard
 
@@ -110,6 +139,15 @@ python3 curate_fetch_structures.py --split val \
 ```
 
 `tmux` because 21 hours will outlive any SSH session.
+
+## A pyarrow trap worth knowing
+
+`open_input_stream` and `open_output_stream` both default to `compression="detect"`
+and act on the *file name*. Reading an object called `something.tar.gz` hands back
+the decompressed bytes with no indication it happened, so writing them to a file of
+the same name produces something `tar xzf` rejects. This broke the first EC2 smoke
+test. Pass `compression=None` whenever you want the object's literal bytes;
+`Destination.write` in the fetcher already does.
 
 ## Resume
 
