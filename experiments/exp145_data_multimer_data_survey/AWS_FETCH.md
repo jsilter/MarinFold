@@ -33,13 +33,19 @@ flags exist for the full-corpus case and are left at their defaults here.
   ~234 MB, so 4 GiB is ample.
 - **Disk**: 20 GB root is enough. Structures stream to S3; nothing large is staged
   locally.
-- **Region**: `us-east-1`. Ingress from EBI is free from anywhere, so pick the
-  region the data will be *read* from later.
+- **Region**: `us-west-2`, matching the account's existing
+  `marinfold-exp91-usw2` bucket. Ingress from EBI is free from anywhere, so the
+  region to pick is the one the data will be *read* from later, and exp91's data
+  is already there.
 - **IAM**: attach an instance role with `s3:PutObject`, `s3:GetObject` and
   `s3:ListBucket` on the destination prefix. **Do not put credentials in the
   environment.** exp91's short-lived CloudShell STS creds expire in ~15 minutes,
   which will not survive a 21-hour run; the instance role auto-refreshes and is
   the only thing that works here.
+
+**Never commit the credential file.** `aws_keys.env` is gitignored at the repo
+root; a `git add -A` in an experiment directory will otherwise sweep it into a
+commit.
 
 ## Bootstrap
 
@@ -57,13 +63,17 @@ cd MarinFold/experiments/exp145_data_multimer_data_survey
 
 ## Step 1: smoke test one shard
 
-The S3 write path has never run. Validate it on 25 models before committing to
-21 hours.
+Run this on the instance role before committing to 21 hours. The procedure was
+validated from a workstation on 2026-09-05 against `s3://marinfold-exp91-usw2/`:
+23 models written as a 2.7 MB tar plus a 330-byte sidecar, read back to valid
+mmCIF, resume correctly skipping the existing shard. What it has *not* been run
+against is an EC2 instance role, which is the only credential source that
+survives 21 hours.
 
 ```bash
 python3 curate_fetch_structures.py --split val \
     --ids data/curation/dimer_split_assignment_id30_cov50.csv.gz \
-    --out s3://<bucket>/MarinFold/exp145-afdb-dimers/val/ \
+    --out s3://marinfold-exp91-usw2/MarinFold/exp145-afdb-dimers/val/ \
     --shard 0 --n-shards 40000 --shard-size 25 --workers 8
 ```
 
@@ -73,11 +83,16 @@ destination. Then confirm a member is real mmCIF:
 ```bash
 python3 -c "
 import io, tarfile, gzip, pyarrow.fs as pafs
-fs = pafs.S3FileSystem(region=pafs.resolve_s3_region('<bucket>'))
-raw = fs.open_input_stream('<bucket>/MarinFold/exp145-afdb-dimers/val/shard_000_00000.tar').read()
+fs = pafs.S3FileSystem(region=pafs.resolve_s3_region('marinfold-exp91-usw2'))
+raw = fs.open_input_stream('marinfold-exp91-usw2/MarinFold/exp145-afdb-dimers/val/shard_000_00000.tar').read()
 t = tarfile.open(fileobj=io.BytesIO(raw))
 name = t.getnames()[0]
-print(name, gzip.decompress(t.extractfile(name).read()).decode().splitlines()[0])
+text = gzip.decompress(t.extractfile(name).read()).decode()
+print(name, text.splitlines()[0])
+# label_asym_id is field 6 and both chains must appear. Field 7 is
+# label_entity_id, legitimately '1' for both chains of a homodimer, so checking
+# that one makes a correct two-chain file look like it has only one.
+print('chains:', sorted({l.split()[6] for l in text.splitlines() if l.startswith('ATOM')}))
 "
 ```
 
@@ -90,7 +105,7 @@ Delete those two test objects before step 2, or the real run will skip
 tmux new -s fetch
 python3 curate_fetch_structures.py --split val \
     --ids data/curation/dimer_split_assignment_id30_cov50.csv.gz \
-    --out s3://<bucket>/MarinFold/exp145-afdb-dimers/val/ \
+    --out s3://marinfold-exp91-usw2/MarinFold/exp145-afdb-dimers/val/ \
     --workers 8 2>&1 | tee fetch.log
 ```
 

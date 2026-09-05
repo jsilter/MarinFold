@@ -220,3 +220,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Credential files. aws_keys.env holds short-lived STS credentials and must
+# never be committed; `git add -A` in an experiment directory will otherwise
+# sweep it in.
+aws_keys.env
+*.env
+!*.example.env
