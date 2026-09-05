@@ -11,6 +11,13 @@ __pycache__/
 # multi-hundred-MB inputs.
 data/curation/subunit_shards/
 data/curation/mmseqs_work/
-data/curation/*.csv.gz
+data/curation/val_cluster_work/
+data/curation/structures/
+data/curation/confident_*.csv.gz
+data/curation/dimer_split_assignment*.csv.gz
 data/curation/val_monomers.fasta
 data/curation/val_monomers.csv
+
+# val_download_list_*.csv.gz is deliberately NOT ignored: it is the input to the
+# structure fetch, it is 0.7-2.2 MB, and the exact set of complexes we fetched is
+# part of the dataset definition.

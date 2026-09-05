@@ -1,15 +1,33 @@
 # Plan: a PINDER-style split for the AFDB dimer release
 
-Status: proposed, 2026-08-24. Nothing in phases 2 onward has been run.
+Status: phases 0 and 2-pilot complete, 2026-09-05. Phases 1 and 3 onward not run.
 
 Context: [`README.md`](README.md) is the survey that issue #145 asked for. This
 plan covers the curation work that followed from it, and the decision recorded in
 conversation to follow PINDER's split protocol rather than the sequence-only split
 already built.
 
+## What this dataset is for, and why that decides its size
+
+**Primary deliverable: a held-out multimer validation set**, a few thousand
+non-redundant complexes usable to validate models trained on contacts-v1
+monomers. Not a training corpus. This is the decision that sizes every download
+below, so it is stated first rather than left implicit.
+
+The consequence is that the clustering population is the **val-eligible 881,010
+complexes**, not all 2,010,800. The other 1,129,790 would be clustered only to
+define communities nobody draws from.
+
+One caveat, stated because it is the thing that would change if the goal changed:
+PINDER's deleaking step exists to keep test systems away from *train* systems. If
+we never train on AFDB dimers there is no train side to deleak against, and the
+leakage that does matter (against the contacts-v1 monomers our models have seen)
+is handled upstream by the sequence split. Reintroducing a training goal
+reintroduces the train-side download and the deleaking pass together.
+
 ## What already exists
 
-Four steps have run to completion and their outputs are on disk under
+Five steps have run to completion and their outputs are on disk under
 `data/curation/`:
 
 | Artifact | Contents |
@@ -18,12 +36,17 @@ Four steps have run to completion and their outputs are on disk under
 | `val_monomers.fasta` | 41,954 contacts-v1 validation monomer sequences, zero unresolved |
 | `subunit_shards/*.fasta` | 1,979,542 dimer subunit sequences, zero unresolved, 767 MB |
 | `dimer_split_assignment_id30_cov50.csv.gz` | per-complex train/val on subunit homology to the validation monomers, 881,010 val-eligible |
+| `fetch_pilot_summary.json`, `fetch_timings.csv` | the phase 2 rate pilot, 8,012 structures |
 
-That last file is **not** superseded by this plan. It answers a question PINDER's
-protocol does not: whether a dimer's chains are homologous to the monomers our
-contacts-v1 models were validated on. PINDER controls leakage *within* a dimer
-set; this controls leakage *between* the dimer set and our existing monomer
-validation split. The two compose, and phase 5 combines them.
+The confident set is already a filtered slice: the release is 29,025,020 models
+(21,430,663 homodimers + 7,594,357 heterodimers) and the gate keeps 6.9% of it.
+
+`dimer_split_assignment_id30_cov50.csv.gz` is **not** superseded by this plan. It
+answers a question PINDER's protocol does not: whether a dimer's chains are
+homologous to the monomers our contacts-v1 models were validated on. PINDER
+controls leakage *within* a dimer set; this controls leakage *between* the dimer
+set and our existing monomer validation split. The two compose, and phase 5
+combines them.
 
 ## Why the sequence-only split is not enough
 
@@ -42,164 +65,19 @@ decision is made once per cluster rather than once per chain.
 
 ## What PINDER does
 
-Recorded in `README.md` from the PINDER preprint (doi 10.1101/2024.07.17.603980):
-2,319,564 dimeric systems clustered by interface structure, split at the cluster
-level into 1,560,682 training dimers from 42,220 clusters, **1,958 validation
-representatives** and 1,955 test systems with interface leakage removed.
-
-Three properties to copy:
-
-1. Cluster on the **interface**, not on chain sequence.
-2. Assign **whole clusters** to splits, never individual complexes.
-3. Draw validation and test from **cluster representatives**, so they are small
-   and non-redundant by construction. PINDER's validation set is 0.08% of its
-   corpus; our sequence rule produced 43.8%, which is a quarantine pool, not a
-   validation set.
-
-**Open item:** PINDER's exact clustering parameters (Foldseek settings, whether
-iAlign refinement is used, how the deleaking graph is built) are not recorded in
-`README.md` and I have not read the methods section. Phase 0 is to read it, so the
-parameters below are replaced by theirs where they differ.
-
-## Phases
-
-### Phase 0. Read the PINDER methods and fix parameters
-
-Cheap and blocking. Everything downstream depends on the clustering thresholds and
-the split-assignment procedure. Deliverable: the parameter table appended to this
-file, with anything we deliberately diverge on marked and justified.
-
-### Phase 1. Choose a region, and accept that this needs cloud storage
-
-The structures are **~230 GB gzipped on the wire and ~950 GB decoded**, measured
-at 466 kB of mmCIF and 115 kB gzipped per model over ten samples. Local disk has
-58 GB free, so this cannot run on the workstation.
-
-The source is EMBL-EBI in Hinxton, UK, so the transatlantic leg is unavoidable if
-compute lands in a US region. `europe-west4` is nearest to EBI and would make the
-fetch the cheapest leg; `AGENTS.md` warns against `europe-west4` because exp53
-spilled workers there and got straggler tails, but that was a job whose *data* was
-in us-central1, which is the opposite of this case. Whichever region is chosen,
-everything downstream stays in it: a 230 GB cross-region copy needs explicit
-human sign-off under `AGENTS.md`, and doing it twice would be a real cost event.
-
-Deliverable: a region, a bucket prefix
-(`gs://marin-<region>/protein-structure/MarinFold/exp145-afdb-dimers/`), and a
-pinned worker zone.
-
-### Phase 2. Fetch 2,010,800 structures
-
-Per-file GETs against `https://alphafold.ebi.ac.uk/files/AF-<id>-model_v1.cif`
-with `Accept-Encoding: gzip`. The FTP tar shards are no help: the confident slice
-is 9% of the release spread across 9,892 + 8,209 shards, so pulling it via tars
-means pulling all 48.8 TB.
-
-Measured inputs: 0.2 to 0.9 s per file serially, and 4.1x compression over ten
-models. **Unmeasured and pilot-blocking:** EBI's aggregate rate limit. UniProt
-throttled us per source IP during the sequence fetch, where four concurrent
-workers on one host produced *lower* aggregate throughput than one; if the EBI
-file endpoint behaves the same way, concurrency has to come from distinct source
-addresses rather than from threads.
-
-Pilot first: 20,000 structures, one worker, then four workers on one host, then
-four workers on four hosts. Report throughput for each before sizing the fan-out.
-
-Shard the ID list by `index % n_shards` over a sorted list, not in blocks, for the
-same reason as the sequence fetch. Write directly to object storage through
-fsspec; never stage 950 GB on a worker's local disk. Record per-file timings to a
-CSV as `AGENTS.md` requires.
-
-### Phase 3. Measure Foldseek-Multimer scaling before committing to a full run
-
-The only Foldseek-Multimer numbers we have are from 45 structures: 90 chains,
-3.6 s to cluster, 3.3 s to search. Nothing about 2 M complexes follows from that.
-
-Run `easy-multimercluster` at 10 k, 50 k and 200 k complexes, recording wall time,
-peak RSS and scratch-disk high-water mark at each point, then fit. The failure to
-plan for is memory on the all-versus-all prefilter over ~4 M chains, not CPU time.
-If the fit says the full run does not fit on one machine, the fallback is to
-cluster in taxon-blocked batches and then merge representatives, which is weaker
-and should only be reached for with the measurement in hand.
-
-Deliverable: a scaling table in this file and a go/no-go on a single-machine run.
-
-### Phase 4. Cluster the full set
-
-`easy-multimercluster` over all 2,010,800 confident complexes, homodimers and
-heterodimers **in one job**. Splitting them into two jobs is the specific mistake
-the smoke test found, since the cross-set cluster it produced would be invisible.
-
-Starting thresholds (subject to phase 0): `--multimer-tm-threshold 0.5`,
-`--chain-tm-threshold 0.0`, `--interface-lddt-threshold 0.0`.
-
-Guard: `smoke_test_foldseek_multimer.py` already carries
-`assert_all_chains_ingested`, which catches Foldseek silently ingesting a fraction
-of the input and exiting 0. That check must run here too, at 4,021,600 chains.
-
-Deliverable: `cluster_id` per `model_entity_id`, plus the cluster-size
-distribution.
-
-### Phase 5. Assign splits at the cluster level
-
-For each interface cluster:
-
-1. If **any** member is flagged by `dimer_split_assignment_id30_cov50.csv.gz` as
-   homologous to a contacts-v1 validation monomer, the whole cluster goes to val.
-   This is what removes the homo/heterodimer asymmetry: the decision is made once
-   per cluster, not once per chain.
-2. Otherwise assign the cluster to train, holding back a fraction for test.
-3. Draw the actual validation and test sets from **cluster representatives**,
-   targeting a few thousand each rather than the full eligible pool.
-
-Report, so the cost of the criterion stays visible: how many clusters and how many
-complexes land in each split, how many clusters were forced to val by rule 1, and
-how many complexes are discarded (in a val-eligible cluster but not drawn as a
-representative).
-
-### Phase 6. Publish
-
-Structures and per-complex tables to the HF bucket under
-`data/afdb-nvda-dimers/`, following the `AGENTS.md` prefix rule. Small artifacts
-(cluster-size distribution, split counts, scaling table) stay in `data/` in git.
-A dataset README stating the gate, the split rule, the thresholds and the exact
-counts ships with it.
-
-## Costs and unknowns, stated up front
-
-| Item | Status |
-|---|---|
-| Structure transfer | ~230 GB, measured per-model, not yet measured in bulk |
-| Storage | ~230 GB compressed, ~950 GB if kept decoded |
-| EBI aggregate rate limit | **unknown**, pilot-blocking |
-| Foldseek-Multimer cost at 2 M | **unknown**, phase 3 measures it |
-| PINDER's exact parameters | **unread**, phase 0 |
-| Local disk | 58 GB free, insufficient; cloud storage required |
-
-The sequence-only split needed no structures. This one does, and that is the
-material change: phases 1 and 2 are the price of clustering on interfaces rather
-than on chains.
-
----
-
-# Phase 0 result: PINDER's actual parameters
-
 Read on 2026-08-24 from `github.com/pinder-org/pinder` at `--depth 1`, files
 `src/pinder-data/pinder/data/{config.py,foldseek_utils.py,get_clusters.py,graph_utils.py}`.
-The preprint's full text is not open in Europe PMC (record PPR884594,
-`inEPMC=N`, `OA=N`), so the code is the source. Where the code and the abstract
-disagree, the code wins.
+The preprint's full text is not open in Europe PMC (record PPR884594, `inEPMC=N`,
+`OA=N`), so the code is the source. Where the code and the abstract disagree, the
+code wins.
 
-## The finding that changes the plan
-
-**PINDER does not use `easy-multimercluster`.** Phase 4 above was written around
-it and is wrong.
-
-What PINDER actually does:
+**PINDER does not use `easy-multimercluster`.** An earlier draft of this plan was
+written around it and was wrong. What PINDER actually does:
 
 1. Runs Foldseek **`easy-search`, all against all, on individual chains**, not on
    complexes (`foldseek_utils.py:206`).
 2. Builds a graph whose nodes are chains and whose edges are alignments passing
-   the filters below (`graph_utils.py:25`).
+   the filters in the parameter table (`graph_utils.py:25`).
 3. Runs **asynchronous label-propagation community detection** on that graph to
    get monomer communities (`get_clusters.py:298`, `cluster_from_graph`).
 4. Defines a dimer's interface cluster as the **sorted pair of its two chains'
@@ -209,8 +87,20 @@ What PINDER actually does:
 So "interface cluster" means "this pair of monomer structural communities", and
 the interface enters through a filter (both sides must have at least 7 interface
 residues) rather than through a multimer alignment. This is cheaper than
-`easy-multimercluster` and it scatters, which resolves the phase 3 scaling worry
-in a way the old plan did not anticipate.
+`easy-multimercluster` and it scatters into independent jobs.
+
+Their published outcome: 2,319,564 dimeric systems, split into 1,560,682 training
+dimers from 42,220 clusters, **1,958 validation representatives** and 1,955 test
+systems with interface leakage removed.
+
+Three properties to copy:
+
+1. Cluster on the **interface**, not on chain sequence.
+2. Assign **whole clusters** to splits, never individual complexes.
+3. Draw validation from **cluster representatives** (`top_n = 1`), so the set is
+   small and non-redundant by construction. PINDER's validation set is 0.08% of
+   its corpus; our sequence rule produced 43.8%, which is a quarantine pool, not
+   a validation set.
 
 ## Parameters
 
@@ -237,7 +127,8 @@ in a way the old plan did not anticipate.
 | | pident score band | 30 to 110 | `GraphConfig.mmseqs_*_threshold` |
 
 `top_n = 1` is how the validation set gets to 1,958 systems: one representative
-per cluster, and the rest of each cluster is simply not drawn.
+per cluster, and the rest of each cluster is simply not drawn. Our phase 5 target
+of a few thousand complexes follows the same mechanism, not a separate quota.
 
 Two threshold pairs are worth noticing because they are deliberately asymmetric.
 Clustering cuts edges below 0.70, but leakage detection searches neighbours down
@@ -258,31 +149,179 @@ the release was produced by AlphaFold-Multimer v2.3.0 weights.
 
 `min_chain_length 40` and `min_atom_types 3` do transfer and are cheap to apply.
 
-## Revised phases 3 and 4
+## Phases
 
-**Phase 3 (revised): all-against-all Foldseek `easy-search` over distinct chains.**
+### Phase 0. Read the PINDER methods and fix parameters. DONE 2026-08-24
 
-The unit is the distinct chain, not the complex. Our 2,010,800 complexes contain
-**1,979,543 distinct subunit accessions** (a homodimer's two chains are the same
-protein), which is the same set we already fetched sequences for. At PINDER's
-50,000-chain sub-database size that is ~40 sub-databases and ~1,600 ordered
-sub-database pairs, each an independent job. This is embarrassingly parallel and
-belongs in a fan-out, which is a better shape than the single large
-`easy-multimercluster` run phase 4 originally assumed.
+Deliverable is the parameter table above, with divergences marked.
 
-Still to measure: wall time and peak RSS for one 50k-by-50k pair at `-s 11.0`,
-`--alignment-type 2`. Multiply by ~1,600 for the total, then decide the fan-out
-width. Measure this before fetching all 2 M structures, since one pair needs only
-100,000 structures and the answer might change the whole approach.
+### Phase 1. Sequence-collapse the val-eligible set before downloading anything
 
-**Phase 4 (revised): graph, communities, cluster IDs.**
+New, and it comes first because it is free and it sizes everything after it.
 
-Build the chain graph with the edge filters in the table, cut edges below 0.70,
-run AsynLPA at seed 40, then label each complex `cluster_{min}_{max}` from its two
-chains' community IDs. Homodimers get `cluster_c_c`, which falls out of the
-construction rather than needing a special case.
+The val-eligible 881,010 complexes contain **858,360 distinct subunit
+accessions**, whose sequences are already on disk. Cluster them with
+`mmseqs easy-cluster` and count the clusters. Complexes whose chains fall in the
+same sequence clusters will almost always land in the same interface community,
+so one complex per distinct sequence-cluster pair is enough to define the
+structural clustering.
 
-The interface-length filter needs interface residues per complex, which Foldseek
-does not give us. That is a separate computation over the downloaded structures
-(contact residues within a distance cutoff on each side), and it has to happen
-before the graph is built.
+The risk is real and stateable rather than unknown: near-identical chains can
+still present different interface geometry (domain swaps, alternative binding
+modes), so this merges some things PINDER would split. For a validation set that
+errs toward fewer and more diverse representatives, which is the safe direction.
+Record how many complexes the collapse discards so the cost stays visible.
+
+Deliverable: the number of complexes phase 2 actually has to fetch. Until it
+exists, treat 881,010 (103 GB) as the ceiling and 2,010,800 (235 GB) as the
+figure for a training corpus we are not currently building.
+
+### Phase 2. Fetch the structures
+
+**Rate pilot: DONE 2026-09-05**, 8,012 structures via
+`curate_fetch_structures.py --sweep`. Results:
+
+| workers | files/s | speedup | 429s | retries |
+|---|---|---|---|---|
+| 1 | 1.44 | 1.00x | 0 | 0 |
+| 2 | 2.85 | 1.98x | 0 | 0 |
+| 4 | 5.96 | 4.14x | 0 | 0 |
+| 8 | 11.54 | 8.01x | 0 | 0 |
+
+Throughput is linear in workers with no throttling of any kind. The mechanism:
+`alphafold.ebi.ac.uk/files/` is served out of Google Cloud Storage, not EBI's own
+web tier (`server: UploadServer`, `x-guploader-uploadid`, `x-goog-storage-class`
+headers, a Google load balancer at 34.149.152.8), with
+`cache-control: public,max-age=86400`.
+
+**We cap at 8 workers anyway.** No rate limit is published: EMBL-EBI's terms of
+use state only that "any attempt to use EMBL-EBI Data Resources and Tools to a
+level that prevents, or is likely to prevent, EMBL-EBI providing services to
+others, will result in the user being blocked", and their `robots.txt` disallows
+`/api` and `/search/sequence` while allowing `/files/`. The only quantitative EBI
+figure anywhere is 10 req/s per IP, forum-sourced from Europe PMC staff for a
+different service. 11.5 files/s sits at that order and is demonstrated safe. If
+we ever need more, the honest route is to email `afdbhelp@ebi.ac.uk` and ask for
+the GCS bucket name, which would make this an in-network copy.
+
+**Measured sizes** over 8,012 files: 117.0 kB on the wire, 508.1 kB decoded,
+4.34x. Per population:
+
+| population | complexes | wire | decoded | at 11.5 files/s |
+|---|---|---|---|---|
+| val-eligible | 881,010 | 103 GB | 448 GB | 21 h |
+| all confident | 2,010,800 | 235 GB | 1,022 GB | 49 h |
+
+**The release has gaps.** 28 of 2,000 files in one batch returned 404, all
+homodimers in the ID band `AF-...74043945` to `...74276307`. Re-requesting all 28
+serially returned 404 again, so they are missing rather than load-shed, and a
+random 400-model sample across the whole confident set was 400/400 present. The
+fetcher records a 404 and continues; **the list of missing models ships as a
+published artifact**, because the dataset is defined by what actually downloaded.
+
+Shard the ID list by `index % n_shards` over a sorted list, not in blocks, for the
+same reason as the sequence fetch. Record per-file timings to CSV as `AGENTS.md`
+requires.
+
+### Phase 2a. Storage and region
+
+Local disk has 58 GB free, so this needs cloud storage regardless of population.
+Decision recorded in conversation: **AWS**, which exp91 already used (EC2 workers
+reading and writing S3).
+
+Costs at current us-east-1 pricing, first month:
+
+| line item | val-eligible (881,010 / 103 GB) | all confident (2,010,800 / 235 GB) |
+|---|---|---|
+| EC2, `c7i.large`, 21 h vs 49 h | $2 on demand | $4 |
+| ingress to AWS | $0 | $0 |
+| S3 PUT at $0.005/1,000 | $4.41 | $10.05 |
+| S3 Standard at $0.023/GB-mo | $2.37/mo | $5.41/mo |
+| later egress to the HF bucket, $0.09/GB after 100 GB free | $0.27 | $12.15 |
+| **total** | **~$9** | **~$32** |
+
+Two things follow. The PUT charge is a third of the total at 2 M objects, so
+**pack structures into tar or parquet shards** rather than writing one key per
+structure. And the eventual S3-to-HF move is over the `AGENTS.md` 10 GB
+cross-region threshold and needs explicit sign-off; the val-eligible population
+keeps that leg under the 100 GB free-egress allowance, which the full set does
+not.
+
+Per [[ec2-worker-no-boto3]]: on ephemeral EC2 workers, read and write S3 through
+`pyarrow.fs.S3FileSystem` with the instance role. Do not `pip install boto3`; it
+wedges the box.
+
+### Phase 3. Measure Foldseek scaling on one sub-database pair
+
+The unit is the distinct chain, not the complex. At PINDER's 50,000-chain
+sub-database size, 858,360 val-side chains is ~18 sub-databases and ~160 ordered
+pairs; the full 1,979,542 would be ~40 and ~1,600. Each pair is an independent
+job, so this fans out.
+
+Measure wall time and peak RSS for **one 50k-by-50k pair** at `-s 11.0`,
+`--alignment-type 2`, lddt scoring, then multiply. One pair needs only 100,000
+structures (12 GB, 2.5 hours of fetching), so this happens **before** the full
+download, not after. The only Foldseek numbers we have are from 45 structures and
+nothing about this scale follows from them.
+
+Deliverable: a scaling table in this file and a fan-out width.
+
+### Phase 4. Graph, communities, cluster IDs
+
+Build the chain graph with the edge filters in the parameter table, cut edges
+below 0.70, run AsynLPA at seed 40, then label each complex `cluster_{min}_{max}`
+from its two chains' community IDs. Homodimers get `cluster_c_c`, which falls out
+of the construction rather than needing a special case.
+
+**Interface residues are a separate computation.** The 7-residues-both-sides
+filter needs per-complex contact residues, which Foldseek does not report. That is
+a pass over the downloaded structures (contact residues within a distance cutoff
+on each side) and it has to happen before the graph is built. It is not in the
+Foldseek cost and was missing from earlier drafts of this plan.
+
+Guard: `smoke_test_foldseek_multimer.py` carries `assert_all_chains_ingested`,
+which catches Foldseek silently ingesting a fraction of the input and exiting 0.
+That check must run on every sub-database build.
+
+Deliverable: `cluster_id` per `model_entity_id`, plus the cluster-size
+distribution.
+
+### Phase 5. Draw the validation set from cluster representatives
+
+For each interface cluster:
+
+1. Confirm every member is flagged val-eligible by
+   `dimer_split_assignment_id30_cov50.csv.gz`. A cluster mixing val-eligible and
+   train-side members is a leakage path and goes to val whole, as in earlier
+   drafts; with a val-only download it should not arise, and if it does, that is
+   a finding worth reporting rather than silently resolving.
+2. Draw **one representative per cluster** (`top_n = 1`), targeting a few thousand.
+
+Report, so the cost of the criterion stays visible: how many clusters and how many
+complexes land in each split, and how many complexes are discarded (in a
+val-eligible cluster but not drawn as a representative).
+
+### Phase 6. Publish
+
+Structures and per-complex tables to the HF bucket under
+`data/afdb-nvda-dimers/`, following the `AGENTS.md` prefix rule. Small artifacts
+(cluster-size distribution, split counts, scaling table, the 404 manifest) stay in
+`data/` in git. A dataset README stating the gate, the split rule, the thresholds
+and the exact counts ships with it.
+
+## Costs and unknowns
+
+| Item | Status |
+|---|---|
+| EBI aggregate rate limit | **measured**: linear to 8 workers, 11.5 files/s, no throttling; GCS-backed |
+| Structure transfer | **measured**: 117.0 kB wire / 508.1 kB decoded per model over 8,012 files |
+| Missing models | **measured**: clustered 404s, 0/400 in a whole-set sample; manifest ships with the data |
+| Storage and AWS cost | **estimated**: ~$9 val-eligible, ~$32 full set, first month |
+| PINDER's exact parameters | **read**, table above |
+| Sequence collapse factor | **unknown**, phase 1 measures it, free |
+| Foldseek cost per 50k pair | **unknown**, phase 3 measures it on 100 k structures |
+| Interface-residue computation | **unknown**, a pass over downloaded structures, not yet designed |
+
+The sequence-only split needed no structures. This one does, and that is the
+material change: phases 1 through 3 exist to make the structure download as small
+as the deliverable allows.
