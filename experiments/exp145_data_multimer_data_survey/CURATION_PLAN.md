@@ -172,9 +172,32 @@ modes), so this merges some things PINDER would split. For a validation set that
 errs toward fewer and more diverse representatives, which is the safe direction.
 Record how many complexes the collapse discards so the cost stays visible.
 
-Deliverable: the number of complexes phase 2 actually has to fetch. Until it
-exists, treat 881,010 (103 GB) as the ceiling and 2,010,800 (235 GB) as the
-figure for a training corpus we are not currently building.
+**Result, 2026-09-05, at 80% bidirectional coverage:**
+
+| min identity | sequence clusters | complexes to fetch | share of val side | wire |
+|---|---|---|---|---|
+| 0.3 | 58,410 | 63,907 | 7.3% | 7.5 GB |
+| 0.5 | 138,230 | 146,309 | 16.6% | 17.1 GB |
+| 0.7 | 281,002 | 291,522 | 33.1% | 34.1 GB |
+
+**Decision: do not collapse.** PINDER does not have this step. Its MMseqs2
+clustering (`--min-seq-id 0.2`) is an *optional parallel* clustering of the
+complete system set producing an alternative cluster label, skipped outright when
+no graph is supplied (`get_clusters.py:322`), and `canonical_method` is
+`foldseek_community` (`config.py:324`). It never decides which structures to look
+at, because PINDER already holds every PDB structure. The collapse is our
+invention, forced by having to fetch over the wire, and it discards between
+589,488 and 817,103 complexes unseen on the assumption that a shared
+sequence-cluster pair implies a shared interface community.
+
+Note the direction of risk, which is the opposite of the split's. In the split, a
+lower identity threshold was *safer*: it caught more remote homology and pushed
+more complexes into val. Here a lower threshold merges more aggressively and
+discards more, so 0.3 is the riskiest row in the table, not the safest.
+
+Phase 2 therefore fetches all 881,010. The numbers above stay in
+`val_cluster_summary.json` as a measured alternative if the transfer ever needs to
+shrink.
 
 ### Phase 2. Fetch the structures
 
@@ -222,6 +245,11 @@ published artifact**, because the dataset is defined by what actually downloaded
 Shard the ID list by `index % n_shards` over a sorted list, not in blocks, for the
 same reason as the sequence fetch. Record per-file timings to CSV as `AGENTS.md`
 requires.
+
+**Runbook: [`AWS_FETCH.md`](AWS_FETCH.md).** One `c7i.large`, eight workers,
+881,010 complexes into 441 tar shards on S3, ~21 h, ~$2 of compute. We do not fan
+out across hosts: 11.5 files/s is the rate demonstrated safe, and multiplying our
+footprint against a public resource to save a day is not a trade worth making.
 
 ### Phase 2a. Storage and region
 
@@ -318,7 +346,7 @@ and the exact counts ships with it.
 | Missing models | **measured**: clustered 404s, 0/400 in a whole-set sample; manifest ships with the data |
 | Storage and AWS cost | **estimated**: ~$9 val-eligible, ~$32 full set, first month |
 | PINDER's exact parameters | **read**, table above |
-| Sequence collapse factor | **unknown**, phase 1 measures it, free |
+| Sequence collapse factor | **measured**: 7.3% / 16.6% / 33.1% at id 0.3 / 0.5 / 0.7; not used, see phase 1 |
 | Foldseek cost per 50k pair | **unknown**, phase 3 measures it on 100 k structures |
 | Interface-residue computation | **unknown**, a pass over downloaded structures, not yet designed |
 

@@ -37,7 +37,8 @@ the instance role automatically. This cost exp91 two days to find.
 Usage::
 
     python3 curate_fetch_structures.py --sweep --n 2000
-    python3 curate_fetch_structures.py --ids data/curation/val_download_list_id30.csv.gz \
+    python3 curate_fetch_structures.py --split val \
+        --ids data/curation/dimer_split_assignment_id30_cov50.csv.gz \
         --out s3://bucket/prefix/ --shard 0 --n-shards 8 --workers 8
 """
 
@@ -296,11 +297,28 @@ def pack_tar(members: list[tuple[str, bytes]]) -> bytes:
     return buffer.getvalue()
 
 
-def load_ids_from_list(path: Path) -> list[tuple[str, str]]:
-    """Read a download list written by ``curate_val_subunit_clusters.py``."""
+def load_ids_from_list(path: Path, split: str | None) -> list[tuple[str, str]]:
+    """Read the id list to fetch.
+
+    Accepts either a download list from ``curate_val_subunit_clusters.py`` or a
+    split assignment from ``curate_val_split.py``. ``--split val`` against the
+    assignment file is the uncollapsed path: it fetches every val-eligible
+    complex, which is what following PINDER means here, since PINDER clusters
+    every system rather than a sequence-collapsed subset of them.
+    """
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt") as handle:
-        return [(row["model_entity_id"], row["kind"]) for row in csv.DictReader(handle)]
+        reader = csv.DictReader(handle)
+        if split is not None and "split" not in (reader.fieldnames or []):
+            raise SystemExit(f"--split {split} given but {path} has no 'split' column")
+        rows = [
+            (row["model_entity_id"], row["kind"])
+            for row in reader
+            if split is None or row["split"] == split
+        ]
+    if not rows:
+        raise SystemExit(f"{path}: no rows selected")
+    return rows
 
 
 def load_ids_strided(data_dir: Path, stride: int) -> list[tuple[str, str]]:
@@ -333,6 +351,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=Path("data/curation"))
     parser.add_argument("--ids", type=Path, help="download list CSV; omit for --sweep")
+    parser.add_argument("--split", help="keep only rows with this split, e.g. val")
     parser.add_argument("--out", default="data/curation/structures", help="directory or s3:// prefix")
     parser.add_argument("--shard", type=int, default=0, help="this host's index")
     parser.add_argument("--n-shards", type=int, default=1, help="number of hosts")
@@ -384,7 +403,7 @@ def main() -> None:
     if not args.ids:
         raise SystemExit("--ids is required unless --sweep is given")
 
-    everything = load_ids_from_list(args.ids)
+    everything = load_ids_from_list(args.ids, args.split)
     # Interleaved, not contiguous: a contiguous block would hand one host all the
     # long sequences and set the wall clock for the whole fan-out.
     mine = everything[args.shard::args.n_shards]
