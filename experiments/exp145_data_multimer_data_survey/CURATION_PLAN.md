@@ -251,6 +251,55 @@ requires.
 out across hosts: 11.5 files/s is the rate demonstrated safe, and multiplying our
 footprint against a public resource to save a day is not a trade worth making.
 
+**Run: DONE 2026-09-06.** One `c7i.large` in us-west-2a, eight workers, headless
+under the instance role. Launched 17:20 UTC 2026-09-05, published `_DONE_rc0` and
+self-terminated at 12:13 UTC 2026-09-06: **18.9 hours** wall, against the 21 h
+estimate above.
+
+| | |
+|---|---|
+| requested | 881,010 (824,126 homodimers, 56,884 heterodimers) |
+| fetched | 880,248 |
+| 404 | 762 (0.09%) |
+| non-404 failures | 0 |
+| retries | 117 |
+| written | 441 tars + 441 sidecars, 103.7 GiB |
+| median shard rate | 10.34 files/s (min 8.93, max 18.68) |
+
+Nothing throttled. Zero non-404 failures across 880k requests over 19 hours at 8
+workers, and 117 retries total (0.013% of requests), which is the strongest
+evidence we have that the 8-worker cap is well inside what the endpoint tolerates.
+
+Shard rate on EC2 (median 10.34 files/s) came in slightly *below* the pilot's 11.5
+measured from a workstation, and individual shards ranged over 2x. The pilot ran
+four fixed-size batches back to back; the full run competed with nothing but
+itself, so the spread is the endpoint's, not ours.
+
+**The transfer estimate above was wrong, and by 4x.** It assumed
+`Accept-Encoding: gzip` would be honoured. It was honoured for 15.8% of requests:
+**740,852 of 880,248 responses (84.2%) came back uncompressed**, and `fetch_one`
+gzipped them locally so the archive stays uniform. Actual bytes pulled from EBI
+were **396 GiB, not the 103 GB projected**; decoded mmCIF totals 448 GiB, so
+essentially all the compression is ours. Stored size is unaffected (103.7 GiB) and
+so is cost, since ingress to EC2 is free. Two consequences:
+
+- The `wire_bytes` column understates the real wire for those 84% of rows. They
+  are identifiable: `fetch_one` negates the status, so `http_status = -200` marks
+  a reply that arrived uncompressed. Any future bandwidth estimate has to branch
+  on that column rather than sum `wire_bytes`.
+- Scaling this to the full confident set means roughly **900 GiB** off EBI, not
+  235 GB. That does not change the AWS bill, but it changes what we are asking of
+  a public resource, and it is the number to quote if we ever email
+  `afdbhelp@ebi.ac.uk` about the GCS bucket.
+
+**Artifacts.** `data/curation/fetch_shard_summary.csv` (441 rows, one per shard)
+and `data/curation/fetch_missing_404.csv` (762 rows, the models that do not
+exist) are in git. The per-input timings CSV is 880,248 rows and 13.5 MB gzipped,
+too large for the repo, and lives beside the shards at
+`s3://marinfold-exp91-usw2/MarinFold/exp145-afdb-dimers/fetch_timings.csv.gz`.
+Phase 3 must exclude the 762 missing models; they are counted in the split
+assignment but have no structure.
+
 ### Phase 2a. Storage and region
 
 Local disk has 58 GB free, so this needs cloud storage regardless of population.
@@ -342,9 +391,9 @@ and the exact counts ships with it.
 | Item | Status |
 |---|---|
 | EBI aggregate rate limit | **measured**: linear to 8 workers, 11.5 files/s, no throttling; GCS-backed |
-| Structure transfer | **measured**: 117.0 kB wire / 508.1 kB decoded per model over 8,012 files |
-| Missing models | **measured**: clustered 404s, 0/400 in a whole-set sample; manifest ships with the data |
-| Storage and AWS cost | **estimated**: ~$9 val-eligible, ~$32 full set, first month |
+| Structure transfer | **measured** over 880,248 models: 122.7 kB stored gzip, 533.7 kB decoded, 472.2 kB actually on the wire (84% of replies arrive uncompressed) |
+| Missing models | **measured**: 762 of 881,010 (0.09%); manifest in `data/curation/fetch_missing_404.csv` |
+| Storage and AWS cost | **measured** for val-eligible: $1.69 compute (18.9 h x $0.08925), $0.004 PUT (882 objects, not 881,010, which is what the tar packing bought), $2.37/mo storage; full set still estimated at ~$32 |
 | PINDER's exact parameters | **read**, table above |
 | Sequence collapse factor | **measured**: 7.3% / 16.6% / 33.1% at id 0.3 / 0.5 / 0.7; not used, see phase 1 |
 | Foldseek cost per 50k pair | **unknown**, phase 3 measures it on 100 k structures |

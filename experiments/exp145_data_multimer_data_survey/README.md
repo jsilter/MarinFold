@@ -1011,6 +1011,27 @@ procedure inside the 20 species plus WHO-pathogen scope is not documented. And
 `ntdx/` and `vr3d/`, two of AFDB's five collaboration datasets, carry no README
 and remain unidentified.
 
+## Curated validation set (in progress)
+
+The survey above recommended the `collaborations/nvda/` release. Turning that
+recommendation into an actual held-out set is a separate, longer piece of work
+tracked in **[`CURATION_PLAN.md`](CURATION_PLAN.md)**, which follows PINDER's
+split protocol. Where it stands:
+
+- **Phases 0 to 2 are done.** The val-eligible side has been downloaded:
+  **880,248 structures, 103.7 GiB**, at
+  `s3://marinfold-exp91-usw2/MarinFold/exp145-afdb-dimers/val/` as 441 tar shards
+  of 2,000 gzipped mmCIFs. 762 of the 881,010 requested model IDs do not exist in
+  the release; they are listed in `data/curation/fetch_missing_404.csv` and must
+  be excluded downstream. Per-shard stats are in
+  `data/curation/fetch_shard_summary.csv`; the 880k-row per-input timings CSV is
+  too large for git and sits beside the shards as `fetch_timings.csv.gz`.
+- **Phases 3 to 6 are open**: Foldseek scaling, interface residues, the chain
+  graph and AsynLPA communities, drawing representatives, publishing.
+
+The AWS procedure, including how to run headless in an account with no SSH key
+pairs, is in **[`AWS_FETCH.md`](AWS_FETCH.md)**.
+
 ## Reproducing the numbers
 
 - `probe_pdb.py`: the PDB census. `python3 probe_pdb.py --out data`. Faceted

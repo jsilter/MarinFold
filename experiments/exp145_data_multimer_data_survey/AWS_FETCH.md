@@ -130,15 +130,33 @@ Delete those two test objects before step 2, or the real run will skip
 
 ## Step 2: the full run
 
+Headless, same shape as the smoke test but with `ec2_fetch_userdata.sh`. There is
+no SSH into this account (no key pairs), so the run is driven entirely from
+user-data and observed through S3. Three things that script does which the smoke
+test did not:
+
+- **Stages a compact ID list.** `val_ids.csv.gz` is `model_entity_id,kind,split`
+  only, 881,010 rows in 2.6 MB, rather than the 26 MB split-assignment table.
+- **Publishes the log to S3 every 5 minutes.** A 19-hour run whose log only
+  appears at the end is not observable.
+- **Publishes `fetch_timings.csv` at the end**, before `shutdown -h now`. It
+  exists only on the instance root volume, which is deleted on termination.
+
 ```bash
-tmux new -s fetch
-python3 curate_fetch_structures.py --split val \
-    --ids data/curation/dimer_split_assignment_id30_cov50.csv.gz \
-    --out s3://marinfold-exp91-usw2/MarinFold/exp145-afdb-dimers/val/ \
-    --workers 8 2>&1 | tee fetch.log
+tar czf scripts.tar.gz curate_fetch_structures.py val_ids.csv.gz
+aws s3 cp scripts.tar.gz s3://marinfold-exp91-usw2/exp145/staging/scripts.tar.gz
+aws ec2 run-instances --region us-west-2 \
+    --image-id ami-07b3d2f97d89e29a4 --instance-type c7i.large \
+    --subnet-id subnet-0a393c46ff06d81c3 \
+    --iam-instance-profile Name=marinfold-exp91-instance-profile \
+    --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=30,VolumeType=gp3}' \
+    --instance-initiated-shutdown-behavior terminate \
+    --user-data file://ec2_fetch_userdata.sh \
+    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=exp145-fetch-full}]'
 ```
 
-`tmux` because 21 hours will outlive any SSH session.
+Clear the output prefix first. A stale tar in the destination is silently skipped
+by the resume logic, which is correct on a rerun and wrong on a fresh run.
 
 ## A pyarrow trap worth knowing
 
@@ -165,6 +183,32 @@ be mistaken for a complete one.
   28 in 2,000 in one ID band and 0 in 400 sampled across the whole confident set,
   so expect a small clustered count. This list ships with the dataset: the
   dataset is defined by what actually downloaded.
-- **`fetch_timings.csv`** stays on the instance and is not written to S3. Copy it
-  off before terminating; `AGENTS.md` requires per-input timings for every
-  predictor and fetch run.
+- **`fetch_timings.csv`.** `ec2_fetch_userdata.sh` publishes it to
+  `exp145/fetch-output/` before shutting down; it exists nowhere else once the
+  root volume goes. `AGENTS.md` requires per-input timings for every predictor and
+  fetch run. At 880k rows it is too large for git, so it belongs beside the shards.
+- **The instance is gone.** `--instance-initiated-shutdown-behavior terminate`
+  plus `shutdown -h now` should leave nothing. Confirm with `describe-instances`
+  and `describe-volumes` in us-west-2: a detached EBS volume bills whether or not
+  an instance is attached to it. This account is shared with other projects, so
+  filter by our region and tags rather than assuming every instance you see is
+  ours.
+
+## Run record: the full val fetch, 2026-09-05 to 2026-09-06
+
+Instance `i-00dbfc381ec876cfc`, `c7i.large` in us-west-2a, launched 17:20 UTC
+2026-09-05. Published `_DONE_rc0` and self-terminated at 12:13 UTC 2026-09-06:
+**18.9 hours**, against a 21 h estimate.
+
+880,248 of 881,010 fetched, 762 404s (0.09%), **zero non-404 failures**, 117
+retries. 441 tars + 441 sidecars, 103.7 GiB, at
+`s3://marinfold-exp91-usw2/MarinFold/exp145-afdb-dimers/val/`. Median shard rate
+10.34 files/s (min 8.93, max 18.68).
+
+Cost: $1.69 of compute, $0.004 of PUTs, $2.37/month of storage.
+
+**84.2% of replies arrived uncompressed** despite `Accept-Encoding: gzip`, so the
+real transfer was 396 GiB rather than the 103 GB projected. See phase 2 of
+`CURATION_PLAN.md`. Those rows carry `http_status = -200`.
+
+Nothing had to be restarted, and the resume path was never exercised on this run.
