@@ -104,6 +104,13 @@ Three properties to copy:
 
 ## Parameters
 
+The Foldseek search, graph-edge and clustering rows below are **recorded, not
+used**: phase 3 clusters directly with `easy-cluster` at TM >= 0.5 and coverage
+0.5, and the reasons are there. They stay in the table because the rejection is
+only meaningful next to what was rejected, and because a training-side dataset
+would need the deleaking rows after all.
+
+
 | Stage | Parameter | PINDER value | Source |
 |---|---|---|---|
 | Foldseek search | `-s` sensitivity | **11.0** (Foldseek's own default is 9.5) | `FoldseekConfig` |
@@ -328,130 +335,131 @@ Per [[ec2-worker-no-boto3]]: on ephemeral EC2 workers, read and write S3 through
 `pyarrow.fs.S3FileSystem` with the instance role. Do not `pip install boto3`; it
 wedges the box.
 
-### Phase 3. Measure Foldseek scaling on one sub-database pair
+### Phase 3. Cluster the chains with Foldseek. DONE (method), pending the full run
 
-The unit is the distinct chain, not the complex. At PINDER's 50,000-chain
-sub-database size, 858,360 val-side chains is ~18 sub-databases and ~160 ordered
-pairs; the full 1,979,542 would be ~40 and ~1,600. Each pair is an independent
-job, so this fans out.
+The unit is the distinct chain, not the complex: 858,360 of them on the val side,
+one per UniProt accession, extracted by `curate_extract_chains.py`. A homodimer's
+two chains are one accession and contribute once.
 
-Measure wall time and peak RSS for **one 50k-by-50k pair** at `-s 11.0`,
-`--alignment-type 2`, lddt scoring, then multiply. One pair needs only 100,000
-structures (12 GB, 2.5 hours of fetching), so this happens **before** the full
-download, not after. The only Foldseek numbers we have are from 45 structures and
-nothing about this scale follows from them.
+**One `foldseek easy-cluster` over all of them, TM-score >= 0.5, coverage 0.5.**
+That is the whole of this phase. Earlier drafts specified PINDER's route instead
+(chain-against-chain `easy-search`, a graph over the hits, AsynLPA communities,
+sharded into 50,000-chain sub-databases and run as 171 pairs). That route was
+measured and rejected; see "Why not PINDER's graph" below.
 
-Deliverable: a scaling table in this file and a fan-out width.
+Measured by `curate_foldseek_scaling.py --op cluster` on 3,376 pilot chains, 8
+threads on 4 physical cores:
 
-**Measured 2026-09-08** by `curate_foldseek_scaling.py`, on 3,376 chains extracted
-from the pilot structures by `curate_extract_chains.py`. Two sweeps, both at
-PINDER's parameters, on an i7-10610U (4 physical cores, 8 threads).
-
-Search cost against database size, at 8 threads:
-
-| chains | search | peak RSS | hits/chain | us/comparison |
-|---|---|---|---|---|
-| 200 | 14.2 s | 0.87 GB | 7.9 | 356 |
-| 400 | 28.1 s | 0.89 GB | 12.3 | 175 |
-| 800 | 61.0 s | 0.93 GB | 20.2 | 95 |
-| 1,600 | 174.0 s | 1.04 GB | 35.8 | 68 |
-| 3,376 | 404.1 s | 1.11 GB | 64.8 | 35 |
-
-**`search_seconds = 0.0212 x n^1.21`**, every point within 12% of the fit. This
-plan assumed super-linear growth because each added chain is both a query and a
-target. That describes the comparison count, but Foldseek's k-mer prefilter never
-performs those comparisons, and cost per nominal comparison falls tenfold across
-the sweep. Peak RSS grows 0.87 to 1.11 GB over a 17x size increase, so memory is
-not the binding constraint anyone expected it to be.
-
-Search cost against thread count, at 1,600 chains:
-
-| threads | search | speedup |
-|---|---|---|
-| 1 | 581.9 s | 1.00x |
-| 2 | 292.9 s | 1.99x |
-| 4 | 169.9 s | 3.42x |
-| 8 | 159.9 s | 3.64x |
-
-The machine has 4 physical cores, so 1 to 4 threads is real parallelism at 85 to
-100% efficiency and 4 to 8 is hyperthreads, worth 6%. Amdahl's serial fraction is
-**5.6%**. This is the number that decides instance size, because EC2 vCPUs are
-hyperthreads too: a c7i.8xlarge's 32 vCPUs are 16 physical cores and will behave
-like 16, not 32.
-
-**One 50,000-chain pair projects to 10.5 single-core hours.** A cross pair (50k
-queries against a different 50k) does the same number of comparisons as a 50k
-self-search, so the self-search measured here is the right proxy for both. The
-val side's 858,360 chains give 18 sub-databases and **171 unordered pairs**,
-self-pairs included.
-
-| instance | physical cores | speedup | efficiency | min/pair | 171 pairs | cost |
+| chains | seconds | peak RSS | clusters | representatives | largest | singletons |
 |---|---|---|---|---|---|---|
-| c7i.4xlarge | 8 | 6.1x | 76% | 103 | 294 h | $210 |
-| c7i.8xlarge | 16 | 9.2x | 58% | 68 | 194 h | $277 |
-| c7i.12xlarge | 24 | 11.1x | 46% | 56 | 161 h | $345 |
+| 400 | 8.6 | 0.85 GB | 222 | 55.5% | 16 | 154 |
+| 800 | 11.0 | 0.85 GB | 354 | 44.3% | 32 | 207 |
+| 1,600 | 15.8 | 0.86 GB | 481 | 30.1% | 44 | 220 |
+| 3,376 | 28.3 | 0.86 GB | 712 | 21.1% | 128 | 312 |
 
-**Fan-out width, not instance size.** The 171 pairs are independent jobs, so wall
-time is set by how many run at once. A 12xlarge finishes one pair 1.8x faster
-than a 4xlarge and costs 3x the hour, and at a 5.6% serial fraction that trade
-only gets worse with size. Run **one pair per c7i.4xlarge**, as wide as the
-account tolerates: 20 concurrent instances is about 15 hours and $210.
+Cost fits **5.5 s + 7.2 ms per chain**, which is linear. A bare power law fits
+these points as `n^0.645`, but that is 5.5 s of fixed startup masquerading as
+sublinear scaling and would extrapolate to nonsense; the affine form is the one to
+project with. Memory is flat at 0.86 GB across the sweep because clustering never
+materializes an all-pairs hit table.
 
-Three caveats on these projections.
+**The full val side projects to about 1.7 hours on four cores, at single-digit
+GB.** One instance, one command. Nothing here needs a fan-out.
 
-- **The extrapolation is 15x beyond the largest measured point** and the
-  laptop's clock is not the cloud's. The tables above hold per-core throughput
-  equal between an i7-10610U and Sapphire Rapids, which understates the cloud by
-  perhaps 1.6x; at that factor the c7i.4xlarge line becomes 64 min/pair and $131.
-  Both columns are in the numbers above because the true value sits between them
-  and neither has been measured.
-- **Hits per chain grew as n^0.74**, 7.9 to 64.8 while chains grew 17x, which
-  projects to ~470 hits per chain and 24 M rows for one 50k pair. That is
-  unbounded output rather than fixed work, and `--max-seqs 1000` starts binding
-  somewhere between 50k and 100k chains. Every point here is in the regime
-  *before* the cap, so the real exponent should bend down past it, making these
-  estimates conservative.
-- **The pilot chains come from one AFDB ID band.** The survey found windows are
-  organism-blocked, so this sample's redundancy is probably not a random 50k
-  sample's redundancy, and hits/chain drives both output size and alignment work.
+**Why TM >= 0.5.** `easy-cluster` has no lddt threshold, so PINDER's lddt 0.70 cut
+does not carry over and we are choosing a line rather than inheriting one. TM 0.5
+is the conventional boundary above which two chains are called the same fold, and
+it is the value in `curate_foldseek_scaling.py`. At TM 0.7 the same 3,376 chains
+give 999 clusters instead of 712, so the threshold moves the count by about 40%
+in the range worth arguing about.
 
-Next: run one real 50,000-chain pair on a c7i.4xlarge in us-west-2 and replace
-the projected row with a measured one before committing to 171 jobs.
+**Why not PINDER's graph.** Three reasons, in descending order of how much they
+matter.
 
-### Phase 4. Graph, communities, cluster IDs
+1. **We do not deleak.** PINDER's graph exists to serve leakage detection between
+   train and test, which is a transitive property: a test system similar to
+   something similar to a train system is a leak path, so you need connected
+   components and the two asymmetric thresholds (cut at 0.70, search neighbours
+   down to 0.55). Nothing trains on AFDB dimers, so there is no train side to
+   deleak against, and the leakage that does matter is handled upstream by the
+   sequence split. The graph would be machinery serving a goal we do not have.
+2. **Transitivity is wrong for this deliverable.** Community detection merges A
+   with C whenever some B sits between them, so a single representative can stand
+   for structures quite unlike each other. `easy-cluster` is set-cover: every
+   member resembles its representative directly. For "give me N mutually
+   dissimilar complexes", that is the property we want.
+3. **It costs 14x more and the gap widens.** Measured at the same chain counts:
 
-Build the chain graph with the edge filters in the parameter table, cut edges
-below 0.70, run AsynLPA at seed 40, then label each complex `cluster_{min}_{max}`
-from its two chains' community IDs. Homodimers get `cluster_c_c`, which falls out
-of the construction rather than needing a special case.
+   | chains | easy-search | easy-cluster | ratio |
+   |---|---|---|---|
+   | 400 | 28.1 s | 7.8 s | 3.6x |
+   | 800 | 61.0 s | 10.3 s | 5.9x |
+   | 1,600 | 174.0 s | 19.4 s | 9.0x |
+   | 3,376 | 404.1 s | 29.0 s | 13.9x |
 
-**Interface residues are a separate computation.** The 7-residues-both-sides
-filter needs per-complex contact residues, which Foldseek does not report. That is
-a pass over the downloaded structures (contact residues within a distance cutoff
-on each side) and it has to happen before the graph is built. It is not in the
-Foldseek cost and was missing from earlier drafts of this plan.
+   The ratio grows because search is `n^1.21` while clustering is linear. Search
+   RSS fits 0.87 GB + 77 kB/chain, so one all-against-all over 858,360 chains
+   wants ~67 GB, which is why PINDER shards at 50,000 in the first place. Sharding
+   is not free either: 171 pairs rebuild the k-mer index 171 times and total 492
+   hours against 90 for a single pass, 5.5x more work to buy the memory back. The
+   full search route came to roughly $210 across 171 fanned-out jobs. Clustering
+   is a few dollars on one.
 
-Guard: `smoke_test_foldseek_multimer.py` carries `assert_all_chains_ingested`,
-which catches Foldseek silently ingesting a fraction of the input and exiting 0.
-That check must run on every sub-database build.
+The measurements behind all of this are in `data/curation/foldseek_scaling.json`
+(search, size), `foldseek_scaling_threads.json` (search, threads) and
+`foldseek_scaling_cluster.json` (cluster, size).
 
-Deliverable: `cluster_id` per `model_entity_id`, plus the cluster-size
-distribution.
+**Two things the pilot cannot tell us**, both to be checked on the real run rather
+than projected:
 
-### Phase 5. Draw the validation set from cluster representatives
+- **How many clusters 858,360 chains give.** The representative fraction falls
+  steadily with size (55% at n=400 to 21% at n=3,376) and extrapolating that trend
+  254x is not honest. Anything from 15,000 to 150,000 is plausible, and either is
+  far more than the few thousand phase 5 draws, so it does not change the plan.
+- **Whether the pilot's redundancy is typical.** These 3,376 chains come from one
+  AFDB ID band, and the survey found those bands are organism-blocked, so their
+  cluster structure is probably not a random sample's.
 
-For each interface cluster:
+Deliverable: `chain_cluster.tsv` mapping every accession to its representative,
+plus the cluster-size distribution.
+
+### Phase 4. Label each complex by its pair of chain clusters
+
+Cheap, and the only step that was never the expensive part. For each complex, look
+up the cluster of `uniprot_1` and of `uniprot_2` and label it
+`cluster_{min}_{max}` from the sorted pair. Homodimers get `cluster_c_c`, which
+falls out of the construction rather than needing a special case.
+
+**Interface residues are dropped from the plan.** PINDER's 7-residues-both-sides
+filter removes systems whose two chains barely touch, and it needs per-complex
+contact residues, which is a full pass over the downloaded structures. It belonged
+in the graph route, where interface length was one of the edge filters. Here it
+would be a quality filter on the drawn set rather than an input to clustering, and
+it is far cheaper to apply it to the few thousand complexes phase 5 draws than to
+all 881,010. Moved to phase 5 as a filter on candidates.
+
+Deliverable: `cluster_id` per `model_entity_id`, plus the distribution of distinct
+cluster pairs.
+
+### Phase 5. Draw the validation set from cluster-pair representatives
+
+For each distinct `cluster_{min}_{max}`:
 
 1. Confirm every member is flagged val-eligible by
-   `dimer_split_assignment_id30_cov50.csv.gz`. A cluster mixing val-eligible and
-   train-side members is a leakage path and goes to val whole, as in earlier
-   drafts; with a val-only download it should not arise, and if it does, that is
-   a finding worth reporting rather than silently resolving.
-2. Draw **one representative per cluster** (`top_n = 1`), targeting a few thousand.
+   `dimer_split_assignment_id30_cov50.csv.gz`. With a val-only download it should
+   not arise otherwise, and if it does, that is a finding worth reporting rather
+   than silently resolving.
+2. Drop candidates with fewer than **7 interface residues on both sides**,
+   computed on the candidates only. This is PINDER's `min_interface_length`,
+   applied here rather than in phase 4.
+3. Exclude the 762 models in `data/curation/fetch_missing_404.csv`, which are in
+   the split assignment but have no structure.
+4. Draw **one representative per cluster pair** (`top_n = 1`), targeting a few
+   thousand.
 
-Report, so the cost of the criterion stays visible: how many clusters and how many
-complexes land in each split, and how many complexes are discarded (in a
-val-eligible cluster but not drawn as a representative).
+Report, so the cost of the criterion stays visible: how many cluster pairs exist,
+how many complexes are drawn, how many are discarded for a thin interface, and how
+many are discarded merely for sharing a cluster pair with the drawn one.
 
 ### Phase 6. Publish
 
@@ -471,9 +479,13 @@ and the exact counts ships with it.
 | Storage and AWS cost | **measured** for val-eligible: $1.69 compute (18.9 h x $0.08925), $0.004 PUT (882 objects, not 881,010, which is what the tar packing bought), $2.37/mo storage; full set still estimated at ~$32 |
 | PINDER's exact parameters | **read**, table above |
 | Sequence collapse factor | **measured**: 7.3% / 16.6% / 33.1% at id 0.3 / 0.5 / 0.7; not used, see phase 1 |
-| Foldseek cost per 50k pair | **projected** from a measured n^1.21 size curve and a 5.6% serial fraction: 10.5 single-core hours, 171 pairs, ~$210 on c7i.4xlarge. Not yet run at 50k |
-| Interface-residue computation | **unknown**, a pass over downloaded structures, not yet designed |
+| Foldseek clustering cost | **measured**: easy-cluster is linear, 5.5 s + 7.2 ms/chain at 0.86 GB, so the full 858,360 chains project to ~1.7 h on 4 cores. The rejected search route was n^1.21 and ~$210 |
+| Cluster count at 858k chains | **unknown**. Representative fraction falls 55% to 21% over the measured range; extrapolating 254x is not honest. Any plausible value exceeds what phase 5 draws |
+| Interface-residue computation | **descoped**: applied in phase 5 to the few thousand drawn candidates, not to all 881,010 |
 
-The sequence-only split needed no structures. This one does, and that is the
-material change: phases 1 through 3 exist to make the structure download as small
-as the deliverable allows.
+The sequence-only split needed no structures. This one does, and the download is
+now the largest thing here at 103.7 GiB; everything downstream of it turned out to
+be small. Both of the expensive-looking phases shrank once measured. Phase 1's
+sequence collapse was dropped because PINDER does not collapse before clustering,
+and phase 3's fan-out was dropped because Foldseek clustering is linear and fits
+in one job. What is left of the plan is one clustering run, a join, and a draw.

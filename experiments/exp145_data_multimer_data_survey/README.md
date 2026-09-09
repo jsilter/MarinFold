@@ -1026,8 +1026,13 @@ split protocol. Where it stands:
   be excluded downstream. Per-shard stats are in
   `data/curation/fetch_shard_summary.csv`; the 880k-row per-input timings CSV is
   too large for git and sits beside the shards as `fetch_timings.csv.gz`.
-- **Phases 3 to 6 are open**: Foldseek scaling, interface residues, the chain
-  graph and AsynLPA communities, drawing representatives, publishing.
+- **Phase 3's method is settled and measured**, the full run is not done. Chains
+  cluster with a single `foldseek easy-cluster` at TM >= 0.5, about 1.7 hours over
+  all 858,360 of them on four cores. PINDER's chain graph and AsynLPA communities
+  were measured and rejected: 14x the cost, and their transitivity is wrong for a
+  deduplicated validation set. The plan records the measurements.
+- **Phases 4 to 6 are open**: label complexes by their pair of chain clusters,
+  draw one per pair, publish.
 
 The AWS procedure, including how to run headless in an account with no SSH key
 pairs, is in **[`AWS_FETCH.md`](AWS_FETCH.md)**.

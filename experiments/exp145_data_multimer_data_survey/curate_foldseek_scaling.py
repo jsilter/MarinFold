@@ -41,6 +41,13 @@ ALIGNMENT_TYPE = "2"
 # here rather than recomputed later.
 FORMAT_OUTPUT = "query,target,fident,alnlen,qstart,qend,tstart,tend,evalue,bits,lddt,qcov,tcov"
 
+# easy-cluster does not take an lddt threshold, so the clustering line is drawn on
+# TM-score instead. 0.5 is the conventional boundary above which two chains are
+# called the same fold; it is our choice, not inherited from PINDER, because
+# PINDER's 0.70 lddt cut does not convert into a TM-score.
+TM_THRESHOLD = "0.5"
+COVERAGE = "0.5"
+
 
 def peak_rss_gb() -> float:
     """Peak RSS of all child processes so far, in GB.
@@ -89,17 +96,70 @@ def run(binary: str, args: list[str], log: Path) -> tuple[float, str]:
     return elapsed, proc.stdout
 
 
-def measure(binary: str, chains: list[Path], n: int, work: Path, threads: int) -> dict:
-    """Build a database of the first n chains and search it against itself."""
+def stage_inputs(chains: list[Path], n: int, work: Path, threads: int) -> Path:
+    """Hard-link the first n chain files into a fresh staging directory.
+
+    Hard links, so a 50k-chain stage costs no extra disk and no copy time.
+    """
     stage = work / f"n{n}_t{threads}"
     if stage.exists():
         shutil.rmtree(stage)
     inputs = stage / "input"
     inputs.mkdir(parents=True)
     for path in chains[:n]:
-        # Hard links, so a 50k-chain stage costs no extra disk and no copy time.
         (inputs / path.name).hardlink_to(path)
+    return stage
 
+
+def measure_cluster(binary: str, chains: list[Path], n: int, work: Path, threads: int) -> dict:
+    """Cluster n chains with easy-cluster and report time, memory and cluster count.
+
+    This is the operation the plan actually uses. easy-search is measured
+    alongside it only to justify the choice: search is n^1.21 and feeds a graph,
+    clustering is linear and produces representatives directly.
+    """
+    stage = stage_inputs(chains, n, work, threads)
+    inputs = stage / "input"
+    prefix = stage / "res"
+    before = peak_rss_gb()
+    seconds, _ = run(binary, [
+        "easy-cluster", str(inputs), str(prefix), str(stage / "tmp"),
+        "-c", COVERAGE, "--cov-mode", "0", "--alignment-type", ALIGNMENT_TYPE,
+        "--tmscore-threshold", TM_THRESHOLD, "--threads", str(threads),
+    ], stage / "cluster.log")
+
+    members = {}
+    with open(f"{prefix}_cluster.tsv") as handle:
+        for line in handle:
+            rep, member = line.rstrip("\n").split("\t")
+            members.setdefault(rep, []).append(member)
+    sizes = sorted((len(v) for v in members.values()), reverse=True)
+    covered = sum(sizes)
+    if covered != n:
+        raise RuntimeError(
+            f"easy-cluster assigned {covered} of {n} chains. Every input must land "
+            f"in exactly one cluster; a short count means chains were dropped."
+        )
+
+    row = {
+        "op": "easy-cluster", "n_chains": n, "threads": threads,
+        "tm_threshold": float(TM_THRESHOLD),
+        "seconds": round(seconds, 1),
+        "peak_rss_gb": round(peak_rss_gb(), 2),
+        "n_clusters": len(members),
+        "representative_fraction": round(len(members) / n, 4),
+        "largest_cluster": sizes[0],
+        "singletons": sum(1 for s in sizes if s == 1),
+    }
+    print(json.dumps(row))
+    shutil.rmtree(stage / "tmp", ignore_errors=True)
+    return row
+
+
+def measure(binary: str, chains: list[Path], n: int, work: Path, threads: int) -> dict:
+    """Build a database of the first n chains and search it against itself."""
+    stage = stage_inputs(chains, n, work, threads)
+    inputs = stage / "input"
     db = stage / "db"
     before = peak_rss_gb()
     db_seconds, stdout = run(binary, ["createdb", str(inputs), str(db)], stage / "createdb.log")
@@ -117,6 +177,7 @@ def measure(binary: str, chains: list[Path], n: int, work: Path, threads: int) -
     n_hits = sum(1 for _ in hits.open())
     db_bytes = sum(p.stat().st_size for p in stage.glob("db*") if p.is_file())
     row = {
+        "op": "easy-search",
         "n_chains": n,
         "threads": threads,
         "createdb_seconds": round(db_seconds, 1),
@@ -145,6 +206,9 @@ def main() -> None:
                         help="thread counts to measure; more than one sweeps parallel "
                              "efficiency, which is what lets a measurement on 8 cores "
                              "predict a 32-vCPU instance")
+    parser.add_argument("--op", choices=["search", "cluster"], default="search",
+                        help="easy-search measures the rejected graph route; "
+                             "easy-cluster measures the one the plan uses")
     parser.add_argument("--tag", default="",
                         help="suffix for the output file, to keep sweeps side by side")
     parser.add_argument("--work", type=Path, default=Path("data/curation/foldseek_scaling"))
@@ -164,7 +228,8 @@ def main() -> None:
 
     # Descending thread order so the slowest configuration runs last and partial
     # output is still the useful half of the curve.
-    rows = [measure(binary, chains, n, args.work, threads)
+    fn = measure_cluster if args.op == "cluster" else measure
+    rows = [fn(binary, chains, n, args.work, threads)
             for n in sizes for threads in sorted(args.threads, reverse=True)]
 
     summary = {"foldseek_version": version, "cpu_count": os.cpu_count(),
