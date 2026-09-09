@@ -343,6 +343,81 @@ nothing about this scale follows from them.
 
 Deliverable: a scaling table in this file and a fan-out width.
 
+**Measured 2026-09-08** by `curate_foldseek_scaling.py`, on 3,376 chains extracted
+from the pilot structures by `curate_extract_chains.py`. Two sweeps, both at
+PINDER's parameters, on an i7-10610U (4 physical cores, 8 threads).
+
+Search cost against database size, at 8 threads:
+
+| chains | search | peak RSS | hits/chain | us/comparison |
+|---|---|---|---|---|
+| 200 | 14.2 s | 0.87 GB | 7.9 | 356 |
+| 400 | 28.1 s | 0.89 GB | 12.3 | 175 |
+| 800 | 61.0 s | 0.93 GB | 20.2 | 95 |
+| 1,600 | 174.0 s | 1.04 GB | 35.8 | 68 |
+| 3,376 | 404.1 s | 1.11 GB | 64.8 | 35 |
+
+**`search_seconds = 0.0212 x n^1.21`**, every point within 12% of the fit. This
+plan assumed super-linear growth because each added chain is both a query and a
+target. That describes the comparison count, but Foldseek's k-mer prefilter never
+performs those comparisons, and cost per nominal comparison falls tenfold across
+the sweep. Peak RSS grows 0.87 to 1.11 GB over a 17x size increase, so memory is
+not the binding constraint anyone expected it to be.
+
+Search cost against thread count, at 1,600 chains:
+
+| threads | search | speedup |
+|---|---|---|
+| 1 | 581.9 s | 1.00x |
+| 2 | 292.9 s | 1.99x |
+| 4 | 169.9 s | 3.42x |
+| 8 | 159.9 s | 3.64x |
+
+The machine has 4 physical cores, so 1 to 4 threads is real parallelism at 85 to
+100% efficiency and 4 to 8 is hyperthreads, worth 6%. Amdahl's serial fraction is
+**5.6%**. This is the number that decides instance size, because EC2 vCPUs are
+hyperthreads too: a c7i.8xlarge's 32 vCPUs are 16 physical cores and will behave
+like 16, not 32.
+
+**One 50,000-chain pair projects to 10.5 single-core hours.** A cross pair (50k
+queries against a different 50k) does the same number of comparisons as a 50k
+self-search, so the self-search measured here is the right proxy for both. The
+val side's 858,360 chains give 18 sub-databases and **171 unordered pairs**,
+self-pairs included.
+
+| instance | physical cores | speedup | efficiency | min/pair | 171 pairs | cost |
+|---|---|---|---|---|---|---|
+| c7i.4xlarge | 8 | 6.1x | 76% | 103 | 294 h | $210 |
+| c7i.8xlarge | 16 | 9.2x | 58% | 68 | 194 h | $277 |
+| c7i.12xlarge | 24 | 11.1x | 46% | 56 | 161 h | $345 |
+
+**Fan-out width, not instance size.** The 171 pairs are independent jobs, so wall
+time is set by how many run at once. A 12xlarge finishes one pair 1.8x faster
+than a 4xlarge and costs 3x the hour, and at a 5.6% serial fraction that trade
+only gets worse with size. Run **one pair per c7i.4xlarge**, as wide as the
+account tolerates: 20 concurrent instances is about 15 hours and $210.
+
+Three caveats on these projections.
+
+- **The extrapolation is 15x beyond the largest measured point** and the
+  laptop's clock is not the cloud's. The tables above hold per-core throughput
+  equal between an i7-10610U and Sapphire Rapids, which understates the cloud by
+  perhaps 1.6x; at that factor the c7i.4xlarge line becomes 64 min/pair and $131.
+  Both columns are in the numbers above because the true value sits between them
+  and neither has been measured.
+- **Hits per chain grew as n^0.74**, 7.9 to 64.8 while chains grew 17x, which
+  projects to ~470 hits per chain and 24 M rows for one 50k pair. That is
+  unbounded output rather than fixed work, and `--max-seqs 1000` starts binding
+  somewhere between 50k and 100k chains. Every point here is in the regime
+  *before* the cap, so the real exponent should bend down past it, making these
+  estimates conservative.
+- **The pilot chains come from one AFDB ID band.** The survey found windows are
+  organism-blocked, so this sample's redundancy is probably not a random 50k
+  sample's redundancy, and hits/chain drives both output size and alignment work.
+
+Next: run one real 50,000-chain pair on a c7i.4xlarge in us-west-2 and replace
+the projected row with a measured one before committing to 171 jobs.
+
 ### Phase 4. Graph, communities, cluster IDs
 
 Build the chain graph with the edge filters in the parameter table, cut edges
@@ -396,7 +471,7 @@ and the exact counts ships with it.
 | Storage and AWS cost | **measured** for val-eligible: $1.69 compute (18.9 h x $0.08925), $0.004 PUT (882 objects, not 881,010, which is what the tar packing bought), $2.37/mo storage; full set still estimated at ~$32 |
 | PINDER's exact parameters | **read**, table above |
 | Sequence collapse factor | **measured**: 7.3% / 16.6% / 33.1% at id 0.3 / 0.5 / 0.7; not used, see phase 1 |
-| Foldseek cost per 50k pair | **unknown**, phase 3 measures it on 100 k structures |
+| Foldseek cost per 50k pair | **projected** from a measured n^1.21 size curve and a 5.6% serial fraction: 10.5 single-core hours, 171 pairs, ~$210 on c7i.4xlarge. Not yet run at 50k |
 | Interface-residue computation | **unknown**, a pass over downloaded structures, not yet designed |
 
 The sequence-only split needed no structures. This one does, and that is the
