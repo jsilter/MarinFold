@@ -423,6 +423,40 @@ than projected:
 Deliverable: `chain_cluster.tsv` mapping every accession to its representative,
 plus the cluster-size distribution.
 
+**Run record.** The first attempt, `i-018e48483b1e9a989` (c7i.2xlarge, us-west-2a,
+launched 2026-09-10T02:10:04Z), never left the extraction stage. It was terminated
+after 8.3 hours having read about 12.5 GB of the 111.3 GB of tar shards, roughly
+11%.
+
+The cause was in `curate_extract_chains.py`, not in Foldseek. `iter_members`
+handed a `pyarrow.fs` `open_input_stream` to `tarfile.open(mode="r|")`, and
+tarfile reads in 10240-byte records, so every record became its own round trip to
+S3. CloudWatch showed the shape of it plainly: NetworkIn flat at 750 MB per 30
+minutes (1.5 GB/h) and CPUUtilization flat at 1.02% of 8 vCPUs, from minute 30 to
+termination. I/O bound at 1/25th of the needed rate, which puts the extraction
+pass at 74 hours and the run at roughly $27.
+
+Measured on `shard_000_00000` from the workstation (cross-region, so read the
+ratio and not the absolute numbers):
+
+| read path | throughput |
+|---|---|
+| `open_input_stream`, 10240-byte reads (what ran) | 0.08 MB/s |
+| `open_input_file().read()`, one whole-object read | 12.06 MB/s |
+
+`io.BufferedReader` over the stream did not reliably fix it (3.77 MB/s on one
+trial, 0.09 on another) because pyarrow returns short `readinto`s that leave the
+buffer partly filled. Shards are ~250 MB, so the fix is to read each one as a
+single object into a `BytesIO`. The script also gained a per-shard progress line
+and a per-50,000-chain counter: the first attempt left nothing in the log but
+5-minute heartbeats, so there was no way to see it was stuck without CloudWatch.
+
+Verified after the fix, locally against the real bucket: 1,200 chains out of
+`shard_000_00000` in 269.5 s, most of that the download.
+
+Relaunched as `i-079d80d205e37cd42` (same instance type, subnet, and 200 GB gp3
+volume) at 2026-09-10T10:43:12Z.
+
 ### Phase 4. Label each complex by its pair of chain clusters
 
 Cheap, and the only step that was never the expensive part. For each complex, look
