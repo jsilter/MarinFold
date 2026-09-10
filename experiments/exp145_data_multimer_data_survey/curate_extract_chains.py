@@ -133,7 +133,7 @@ def iter_members(source: str, shard_stride: int = 1):
             # in production as an extraction pass on track to take 74 hours. The
             # shards are ~250 MB each, so holding one in memory costs nothing.
             with fs.open_input_file(name) as handle:
-                blob = handle.read_all()
+                blob = handle.read()
             yield from iter_tar(io.BytesIO(blob), name)
         return
 
