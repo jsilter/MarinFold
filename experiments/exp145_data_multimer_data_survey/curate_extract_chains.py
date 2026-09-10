@@ -120,11 +120,21 @@ def iter_members(source: str, shard_stride: int = 1):
         listing = fs.get_file_info(pyarrow.fs.FileSelector(path, recursive=False))
         tars = sorted(f.path for f in listing if f.path.endswith(".tar"))[::shard_stride]
         print(f"{len(tars)} tar shards from {source} (stride {shard_stride})")
-        for name in tars:
-            # compression=None: open_input_stream defaults to "detect" and acts on
-            # the file name, which silently gunzips anything ending in .gz.
-            with fs.open_input_stream(name, compression=None) as stream:
-                yield from iter_tar(stream, name)
+        started = time.time()
+        for index, name in enumerate(tars):
+            # A run this long is unobservable without a progress line: the first
+            # attempt spent 8 hours in here with nothing in the log but heartbeats.
+            print(f"[{time.time() - started:8.0f}s] shard {index + 1}/{len(tars)} "
+                  f"{name.rsplit('/', 1)[-1]}", flush=True)
+            # Read each tar as one object rather than streaming it. tarfile pulls
+            # 10240-byte records, and open_input_stream turns every one of those
+            # into its own round trip: measured 0.08 MB/s against 12 MB/s for
+            # whole-object reads of the same tar, a 47x difference that showed up
+            # in production as an extraction pass on track to take 74 hours. The
+            # shards are ~250 MB each, so holding one in memory costs nothing.
+            with fs.open_input_file(name) as handle:
+                blob = handle.read_all()
+            yield from iter_tar(io.BytesIO(blob), name)
         return
 
     root = Path(source)
@@ -186,6 +196,8 @@ def main() -> None:
             (args.out / f"{need[chain]}.cif.gz").write_bytes(
                 gzip.compress(text.encode(), compresslevel=6, mtime=0))
             written += 1
+            if written % 50_000 == 0:
+                print(f"  {written:,} chains written, {skipped:,} already on disk", flush=True)
         if args.limit and written + skipped >= args.limit:
             break
 
