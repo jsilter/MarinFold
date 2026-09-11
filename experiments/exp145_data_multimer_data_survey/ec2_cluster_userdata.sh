@@ -1,5 +1,5 @@
 #!/bin/bash
-# exp145 phase 3: cluster all 858,360 val-side chains with one foldseek easy-cluster.
+# exp145 phase 3: cluster every val-side chain with one foldseek easy-cluster.
 #
 # Two stages on one box. Extraction streams the 441 tar shards out of S3 and writes
 # one file per distinct UniProt accession (~42 GB); clustering then runs over that
@@ -20,7 +20,6 @@ exec > /var/log/exp145-cluster.log 2>&1
 B=marinfold-exp91-usw2
 OUT=exp145/cluster-output
 SRC=s3://$B/MarinFold/exp145-afdb-dimers/val/
-EXPECTED_CHAINS=858360
 CHAINS=/data/chains
 cd /root
 
@@ -78,22 +77,27 @@ done
 ( while true; do sleep 300; publish /var/log/exp145-cluster.log "$B/$OUT/cluster.log"; done ) &
 HEARTBEAT=$!
 
-# Stage 1: 858,360 chain files onto the data volume, streamed from S3 in-region.
+# Stage 1: one chain file per accession onto the data volume, from S3 in-region,
+# one worker per vCPU. The script owns the completeness check: it knows which
+# models 404'd during the fetch and which accessions those block, and it writes
+# every absent accession to /data/chains_absent.csv. The first attempt failed here
+# on a hard-coded 858,360 that did not subtract the 762 unfetchable models, so
+# there is deliberately no count in this file to get wrong.
 python3 curate_extract_chains.py --source "$SRC" --split val \
     --assignment data/curation/dimer_split_assignment_id30_cov50.csv.gz \
-    --out "$CHAINS" || die extract
+    --missing data/curation/fetch_missing_404.csv \
+    --workers "$(nproc)" --out "$CHAINS" || die extract
 
-# A short extraction must not become a quiet clustering of whatever arrived.
 N=$(ls "$CHAINS" | wc -l)
-echo "extracted $N chains, expected $EXPECTED_CHAINS"
-[ "$N" -eq "$EXPECTED_CHAINS" ] || die "extract_short_$N"
+echo "extracted $N chains"
+publish /data/chains_absent.csv "$B/$OUT/chains_absent.csv"
 
 # Stage 2: one clustering pass over all of them.
 python3 curate_foldseek_scaling.py --chains "$CHAINS" --op cluster \
-    --sizes "$EXPECTED_CHAINS" --threads "$(nproc)" \
+    --sizes "$N" --threads "$(nproc)" \
     --work /data/cluster_work --out data/curation --tag _full || die cluster
 
-TSV=$(ls /data/cluster_work/n${EXPECTED_CHAINS}_t*/res_cluster.tsv 2>/dev/null | head -1)
+TSV=$(ls /data/cluster_work/n${N}_t*/res_cluster.tsv 2>/dev/null | head -1)
 [ -n "$TSV" ] && [ -s "$TSV" ] || die missing_cluster_tsv
 gzip -9 -c "$TSV" > /root/chain_cluster.tsv.gz || die gzip_tsv
 
@@ -107,7 +111,8 @@ publish /var/log/exp145-cluster.log         "$B/$OUT/cluster.log"
 python3 - <<'PY' || die verify_published
 import pyarrow.fs as pafs
 fs = pafs.S3FileSystem(region=pafs.resolve_s3_region("marinfold-exp91-usw2"))
-want = ["chain_cluster.tsv.gz", "foldseek_scaling_full.json", "chains_summary.json", "cluster.log"]
+want = ["chain_cluster.tsv.gz", "foldseek_scaling_full.json", "chains_summary.json",
+        "chains_absent.csv", "cluster.log"]
 for name in want:
     key = f"marinfold-exp91-usw2/exp145/cluster-output/{name}"
     info = fs.get_file_info(key)
