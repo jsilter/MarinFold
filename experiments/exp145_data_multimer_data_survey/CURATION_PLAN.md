@@ -455,7 +455,31 @@ Verified after the fix, locally against the real bucket: 1,200 chains out of
 `shard_000_00000` in 269.5 s, most of that the download.
 
 Relaunched as `i-079d80d205e37cd42` (same instance type, subnet, and 200 GB gp3
-volume) at 2026-09-10T10:43:12Z.
+volume) at 2026-09-10T10:43:12Z. That one extracted cleanly, 857,597 chains and
+45.3 GB across all 441 shards in 14,471.9 s (4.02 h), and then died on the
+completeness guard in `ec2_cluster_userdata.sh`, which compared the result against
+a hard-coded `EXPECTED_CHAINS=858360`. That constant never subtracted the 762
+complexes the fetch could not retrieve, so a complete extraction published
+`_FAILED_extract_short_857597` and clustering never ran.
+
+**The chain arithmetic, reconciled against `fetch_timings.csv.gz`.** The
+assignment holds **881,009** val complexes, not the 881,010 quoted elsewhere in
+this plan. 762 of them 404'd, 880,247 distinct models were fetched, and one,
+`AF-0000000208803286`, was fetched twice, which is why the timings carry 880,248
+rows. Of the 858,360 distinct accessions, 760 are reachable only through a 404'd
+complex and 2 more fall back to a second complex that also contains them, so
+**857,600 chains are expected**. The 4.02-hour run wrote 857,597, leaving exactly
+one accession unexplained; `curate_extract_chains.py` now writes every absent
+accession and its source model to `chains_absent.csv`, so the next run names it.
+
+The guard also moved out of the shell and into the script, which knows the 404
+list and can say which accessions are missing rather than reporting a count the
+caller has to re-derive. There is deliberately no chain count left in the
+user-data. Extraction is now a spawn-based `multiprocessing.Pool` over shards, one
+worker per vCPU, which should take the 4.02 hours to roughly 35 minutes; verified
+on two real shards, with 400 outputs byte-identical to the serial path's.
+
+Relaunched again as `i-0ef9e10000084db14` at 2026-09-11T00:12:47Z.
 
 ### Phase 4. Label each complex by its pair of chain clusters
 

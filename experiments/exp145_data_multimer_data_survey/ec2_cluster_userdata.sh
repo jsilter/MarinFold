@@ -70,7 +70,8 @@ print("staged", len(data), "bytes")
 PY
 tar xzf scripts.tar.gz || die untar
 for f in curate_extract_chains.py curate_foldseek_scaling.py foldseek_env.py \
-         data/curation/dimer_split_assignment_id30_cov50.csv.gz; do
+         data/curation/dimer_split_assignment_id30_cov50.csv.gz \
+         data/curation/fetch_missing_404.csv; do
   [ -f "$f" ] || die "missing_staged_$(basename "$f")"
 done
 
