@@ -335,7 +335,7 @@ Per [[ec2-worker-no-boto3]]: on ephemeral EC2 workers, read and write S3 through
 `pyarrow.fs.S3FileSystem` with the instance role. Do not `pip install boto3`; it
 wedges the box.
 
-### Phase 3. Cluster the chains with Foldseek. DONE (method), pending the full run
+### Phase 3. Cluster the chains with Foldseek. DONE 2026-09-11
 
 The unit is the distinct chain, not the complex: 858,360 of them on the val side,
 one per UniProt accession, extracted by `curate_extract_chains.py`. A homodimer's
@@ -409,16 +409,21 @@ The measurements behind all of this are in `data/curation/foldseek_scaling.json`
 (search, size), `foldseek_scaling_threads.json` (search, threads) and
 `foldseek_scaling_cluster.json` (cluster, size).
 
-**Two things the pilot cannot tell us**, both to be checked on the real run rather
-than projected:
+**Two things the pilot could not tell us**, both now answered by the full run:
 
-- **How many clusters 858,360 chains give.** The representative fraction falls
-  steadily with size (55% at n=400 to 21% at n=3,376) and extrapolating that trend
-  254x is not honest. Anything from 15,000 to 150,000 is plausible, and either is
-  far more than the few thousand phase 5 draws, so it does not change the plan.
-- **Whether the pilot's redundancy is typical.** These 3,376 chains come from one
-  AFDB ID band, and the survey found those bands are organism-blocked, so their
-  cluster structure is probably not a random sample's.
+- **How many clusters 858,360 chains give.** 857,599 chains gave **13,478**, a
+  representative fraction of 1.57% against 21.1% at n=3,376. The guess here was
+  "anything from 15,000 to 150,000", so the real answer lands just under the low
+  end of a range that spanned an order of magnitude. Wrong in the safe direction:
+  13,478 is still far more than the few thousand phase 5 draws.
+- **Whether the pilot's redundancy is typical.** It is not, and it understated
+  the redundancy badly. The full set is much flatter than one ID band suggested:
+  the largest cluster holds 15,861 chains, more than four times the entire pilot.
+
+The affine cost fit held. 5.5 s + 7.2 ms per chain projects 1.72 h for 857,599
+chains; the run took 0.97 h on 8 vCPUs against the pilot's 4 physical cores, so
+the projection was conservative by the thread count and little else. Peak RSS was
+4.12 GB, above the pilot's flat 0.86 GB but nowhere near a constraint.
 
 Deliverable: `chain_cluster.tsv` mapping every accession to its representative,
 plus the cluster-size distribution.
@@ -479,7 +484,35 @@ user-data. Extraction is now a spawn-based `multiprocessing.Pool` over shards, o
 worker per vCPU, which should take the 4.02 hours to roughly 35 minutes; verified
 on two real shards, with 400 outputs byte-identical to the serial path's.
 
-Relaunched again as `i-0ef9e10000084db14` at 2026-09-11T00:12:47Z.
+Relaunched again as `i-0ef9e10000084db14` at 2026-09-11T00:12:47Z. **That run
+succeeded**, publishing `_DONE_rc0` and all five artifacts at 01:51:18Z: 1.64
+hours end to end, about $0.58 at the c7i.2xlarge on-demand rate.
+
+| stage | result |
+|---|---|
+| extract | 857,599 of 857,600 chains, 45,294,441,724 bytes, 51.6 kB mean, 441 shards, **2,227.6 s (37.1 min)** on 8 workers |
+| cluster | **13,478 clusters** over 857,599 chains, **3,478.0 s (58.0 min)**, 4.12 GB peak RSS |
+
+Parallelising extraction took it from 14,471.9 s to 2,227.6 s, a **6.5x speedup**
+on 8 vCPUs, so clustering is now the longer of the two stages rather than the
+shorter.
+
+**The one absent chain, and its cause.** `chains_absent.csv` held exactly one row,
+`A0A3Q1MTM2,AF-0000000208803286,A`. `AF-0000000208803286` appears **twice** in the
+assignment as two different complexes, the homodimer `A0A3Q1MTM2/A0A3Q1MTM2` and
+the heterodimer `A0A044RNL9/A0A044S3F6`, and it is the only model id in the val
+assignment that does. `init_worker` inverted the accession-to-source map with
+`by_model[model][chain] = accession`, so the heterodimer's chain A overwrote the
+homodimer's and that accession was never requested. The same duplicate explains
+both the 881,010-versus-881,009 complex count and the duplicate row in
+`fetch_timings.csv.gz`.
+
+`by_model` now holds a list of `(chain, accession)` pairs, which reproduces all
+857,600 expected chains from the same assignment. The fix is not reflected in the
+published `chain_cluster.tsv.gz`: one chain in 857,599 cannot move 13,478
+clusters, and re-running extraction and clustering to add it would cost another
+1.6 hours and $0.58. It is recorded here instead, and the missing accession is
+excluded downstream like the 762 unfetchable models.
 
 ### Phase 4. Label each complex by its pair of chain clusters
 

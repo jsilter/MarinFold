@@ -160,9 +160,16 @@ _STATE: dict = {}
 
 def init_worker(assignment: str, split: str, missing: str, out: str, source: str) -> None:
     sources = choose_sources(Path(assignment), split, load_missing(Path(missing) if missing else None))
-    by_model: dict[str, dict[str, str]] = {}
+    # A list of (chain, accession), never a dict keyed by chain: one model id can
+    # carry two different accessions on the same chain letter, because a model id
+    # can appear in the assignment as two different complexes. AF-0000000208803286
+    # is both the homodimer A0A3Q1MTM2/A0A3Q1MTM2 and the heterodimer
+    # A0A044RNL9/A0A044S3F6, and it is the only such id in the val assignment. A
+    # chain-keyed dict dropped the first of those, which is the one chain the first
+    # full run came up short.
+    by_model: dict[str, list[tuple[str, str]]] = {}
     for accession, (model, chain) in sources.items():
-        by_model.setdefault(model, {})[chain] = accession
+        by_model.setdefault(model, []).append((chain, accession))
     _STATE["by_model"] = by_model
     _STATE["out"] = Path(out)
     _STATE["fs"] = (pyarrow.fs.S3FileSystem(
@@ -179,16 +186,23 @@ def extract_shard(name: str) -> tuple[str, int, int]:
         wanted = by_model.get(model)
         if not wanted:
             continue
-        need = {chain: acc for chain, acc in wanted.items()
-                if not (out / f"{acc}.cif.gz").exists()}
+        need = [(chain, acc) for chain, acc in wanted
+                if not (out / f"{acc}.cif.gz").exists()]
         skipped += len(wanted) - len(need)
         if not need:
             continue
-        for chain, chain_text in split_chains(text, set(need)).items():
+        chains = split_chains(text, {chain for chain, _ in need})
+        for chain, acc in need:
+            chain_text = chains.get(chain)
+            if chain_text is None:
+                # The file does not hold the chain the assignment promised. Not
+                # raised: chains_absent.csv names every accession that ends up
+                # missing and --max-absent is the threshold that fails the run.
+                continue
             # Level 6, not the default 9: measured on this data, level 9 costs
             # 25.8 ms per structure against 6.1 and produces a marginally larger
             # file. mtime=0 keeps the output byte-identical across reruns.
-            (out / f"{need[chain]}.cif.gz").write_bytes(
+            (out / f"{acc}.cif.gz").write_bytes(
                 gzip.compress(chain_text.encode(), compresslevel=6, mtime=0))
             written += 1
     return name, written, skipped
