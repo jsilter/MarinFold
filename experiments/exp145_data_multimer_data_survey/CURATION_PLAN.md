@@ -426,7 +426,10 @@ the projection was conservative by the thread count and little else. Peak RSS wa
 4.12 GB, above the pilot's flat 0.86 GB but nowhere near a constraint.
 
 Deliverable: `chain_cluster.tsv` mapping every accession to its representative,
-plus the cluster-size distribution.
+plus the cluster-size distribution. Both are in `data/curation/`, and
+[`CLUSTERING_REPORT.md`](CLUSTERING_REPORT.md) reads them: the distribution, the
+chain-length check on the head, and the 17,083 distinct cluster pairs that cap
+the val set.
 
 **Run record.** The first attempt, `i-018e48483b1e9a989` (c7i.2xlarge, us-west-2a,
 launched 2026-09-10T02:10:04Z), never left the extraction stage. It was terminated
