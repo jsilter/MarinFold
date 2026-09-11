@@ -227,3 +227,7 @@ __marimo__/
 aws_keys.env
 *.env
 !*.example.env
+
+# exp145 phase 4: the per-complex cluster-pair labels, 881,010 rows / 14 MB.
+# Regenerate with curate_label_pairs.py; the pair index and summary are committed.
+experiments/exp145_data_multimer_data_survey/data/curation/complex_cluster_pairs.csv.gz

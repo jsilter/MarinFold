@@ -535,6 +535,30 @@ all 881,010. Moved to phase 5 as a filter on candidates.
 Deliverable: `cluster_id` per `model_entity_id`, plus the distribution of distinct
 cluster pairs.
 
+**Run record. DONE 2026-09-11**, by `curate_label_pairs.py`, locally in about a
+minute. All 881,010 val rows are in the output, each carrying a `status`, so the
+count reconciles against the assignment and nothing is dropped quietly:
+
+| status | rows |
+|---|---|
+| `labeled` | 880,247 |
+| `unfetchable` (404'd during the fetch) | 762 |
+| `unmapped_chain` | 1 |
+
+Of the labeled complexes, 824,125 are homodimers and 56,122 heterodimers, giving
+**17,083 distinct cluster pairs**, 10,151 of them same-cluster. The median pair
+holds one complex, the largest holds 15,846, and **8,621 pairs (50.5%) hold
+exactly one**, which is the number phase 5's interface filter can delete outright.
+
+`model_entity_id` is not a unique key. `AF-0000000208803286` is two different
+complexes and appears twice, once as `unmapped_chain` and once as a labeled
+heterodimer; phase 5 must key on the row, not the model id.
+
+`complex_cluster_pairs.csv.gz` is 881,010 rows and 14 MB, so it stays local and
+gitignored. Committed alongside the script: `cluster_pair_index.csv.gz` (17,083
+rows, one per distinct pair, with its complex and homodimer counts) and
+`cluster_pair_summary.json`.
+
 ### Phase 5. Draw the validation set from cluster-pair representatives
 
 For each distinct `cluster_{min}_{max}`:
