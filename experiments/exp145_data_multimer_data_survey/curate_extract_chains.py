@@ -104,20 +104,27 @@ def split_chains(text: str, wanted: set[str]) -> dict[str, str]:
     return out
 
 
-def iter_tar(stream, name: str):
+def iter_tar(stream, name: str, wanted: set[str] | None = None):
     """Yield (model_entity_id, mmCIF text) from one open tar stream.
 
     Mode "r|" is the streaming reader: it never seeks, so the same code path works
     on a local file and on a tar already in memory.
+
+    `wanted` skips members before they are decompressed. A caller that needs a
+    small subset of a shard pays about 12 s of gzip per shard otherwise, which is
+    most of the CPU in a pass that only wants a few dozen of the 2,000 members.
     """
     with tarfile.open(fileobj=stream, mode="r|") as tar:
         for member in tar:
             if not member.name.endswith(".cif.gz"):
                 continue
+            model = member.name.removesuffix(".cif.gz")
+            if wanted is not None and model not in wanted:
+                continue
             handle = tar.extractfile(member)
             if handle is None:
                 raise ValueError(f"{name}: {member.name} is not a regular file")
-            yield member.name.removesuffix(".cif.gz"), gzip.decompress(handle.read()).decode()
+            yield model, gzip.decompress(handle.read()).decode()
 
 
 def list_shards(source: str, shard_stride: int) -> list[str]:
