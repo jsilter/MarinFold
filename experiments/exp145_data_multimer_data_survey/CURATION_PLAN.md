@@ -559,7 +559,7 @@ gitignored. Committed alongside the script: `cluster_pair_index.csv.gz` (17,083
 rows, one per distinct pair, with its complex and homodimer counts) and
 `cluster_pair_summary.json`.
 
-### Phase 5. Draw the validation set from cluster-pair representatives
+### Phase 5. Draw the validation set from cluster-pair representatives. DONE 2026-09-12
 
 For each distinct `cluster_{min}_{max}`:
 
@@ -606,6 +606,47 @@ interface among them is 10 residues at 4 A against a threshold of 7. These 45 ca
 from the confidence-gated smoke fetch rather than a random draw, so this is a hint
 and not a yield estimate; the real numbers come from the run. Per-structure
 counts and timings: `data/curation/interface_sample_45.csv`.
+
+
+**Run record. DONE 2026-09-12.** `i-02756293aca0ea4e1` (c7i.2xlarge, us-west-2a)
+measured all 31,956 candidates in **486 s**, launched 00:26:35Z and `_DONE_rc0` at
+00:35:33Z, about $0.06. It read the 441 shards at 229 MB/s, 4.6x faster than the
+37 minutes projected from the extraction pass, because that pass was also writing
+45 GB of gzip to EBS. No candidate was missing from the shards.
+
+The interface filter barely bites, as the 45-structure sample suggested.
+**31,929 of 31,956 candidates clear 7 residues on both sides at 5 A**, a 0.08%
+failure rate, and the drawn set's median thinnest side is 37 residues against a
+threshold of 7.
+
+| the four counts this phase owes | |
+|---|---|
+| cluster pairs | 17,083 |
+| complexes drawn | **17,067** |
+| discarded for a thin interface | 24 measured, costing 16 pairs |
+| discarded only for sharing a pair with the drawn one | 863,156 |
+
+17,064 pairs are represented by their top-ranked candidate, so carrying three
+candidates per pair instead of one rescued **3 pairs**. Cheap insurance at 9
+minutes of runtime, and not worth repeating at a larger multiple.
+
+The draw is **40.8% heterodimers** (6,963 of 17,067) against 6.4% in the corpus,
+which is the chain clustering doing its job: a homodimer-heavy release collapses
+hard, and the rarer heterodimers survive deduplication in much greater proportion.
+It covers 13,473 of the 13,478 chain clusters. The 16 lost pairs are named in
+`data/curation/val_set_pairs_lost.csv`.
+
+**Confidence is not gated, and the tail is soft.** ipTM across the drawn set runs
+from 0.099 to 0.970 with a median of 0.768; **22.3% sit below 0.5**, and 3,017 of
+those 3,811 are pairs holding a single complex, where there was no more confident
+alternative to pick. Ranking by ipTM cannot fix a pair whose only member is a weak
+prediction. Adding a floor would trade cluster-pair coverage for per-structure
+quality, and that trade is a decision for whoever uses the set rather than one to
+bury in the draw.
+
+Deliverable: `data/curation/val_set_dimers.csv`, 17,067 rows carrying the model id,
+the pair label, both clusters, both accessions, ipTM, pDockQ2 and the measured
+interface counts.
 
 ### Phase 6. Publish
 

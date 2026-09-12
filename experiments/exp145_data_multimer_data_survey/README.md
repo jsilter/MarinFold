@@ -1035,8 +1035,16 @@ split protocol. Where it stands:
   half the chains. Labeling complexes by their chain-cluster pair gives **17,083
   distinct pairs**, which caps the val set. See
   **[`CLUSTERING_REPORT.md`](CLUSTERING_REPORT.md)**.
-- **Phases 4 to 6 are open**: label complexes by their pair of chain clusters,
-  draw one per pair, publish.
+- **Phases 4 and 5 are done.** Labeling every complex by its chain-cluster pair
+  gives **17,083 distinct pairs**; measuring interface residues for the top three
+  candidates of each (31,956 structures, one 486 s pass over the shards) and
+  drawing the best that clears 7 residues on both sides gives a validation set of
+  **17,067 dimers**, 40.8% of them heterodimers against 6.4% in the corpus. The
+  interface filter removes 0.08% of candidates and costs 16 pairs. The set is in
+  `data/curation/val_set_dimers.csv`. It is not confidence-gated: ipTM runs
+  0.099 to 0.970, median 0.768, with 22.3% below 0.5, mostly pairs whose single
+  member is a weak prediction.
+- **Phase 6 is open**: publish to the HF bucket under `data/afdb-nvda-dimers/`.
 
 The AWS procedure, including how to run headless in an account with no SSH key
 pairs, is in **[`AWS_FETCH.md`](AWS_FETCH.md)**.
