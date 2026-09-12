@@ -579,6 +579,34 @@ Report, so the cost of the criterion stays visible: how many cluster pairs exist
 how many complexes are drawn, how many are discarded for a thin interface, and how
 many are discarded merely for sharing a cluster pair with the drawn one.
 
+**Interface measurement, measured locally 2026-09-11.**
+`curate_interface_residues.py` counts, per side, the residues with a heavy atom
+within a contact radius of the partner chain. PINDER publishes
+`min_interface_length = 7` without the radius it was computed at, so the radius is
+a flag defaulting to 5.0 A (the CAPRI/DockQ heavy-atom convention) rather than an
+inherited constant.
+
+Cost on the 45 local dimers in `sample/structures` (median 5,470 heavy atoms, max
+15,926), single core: **74 ms per structure**, 18 ms parsing the mmCIF and 56 ms
+on contacts at one radius. An exact residue-level prefilter does most of the work:
+a residue pair can only touch if their centroids are within the sum of their
+measured enclosing radii plus the contact radius, which cuts the atom-against-atom
+pass by 4.6x (11.59 s to 2.53 s over the 45) and reproduces the unfiltered counts
+exactly on every one of them.
+
+That puts all 880,247 labeled complexes at 18 h single core, **2.3 h on 8 vCPUs**,
+against 2.6 min for the 17,083 drawn candidates alone. Reading the 111.3 GB of
+shards costs 37 min either way, so computing the interface for every complex adds
+about $0.83 and produces a table that can be re-thresholded without touching S3
+again. Run it over everything.
+
+**The threshold looks close to a no-op on this data**, on the evidence available.
+All 45 sample dimers pass at every radius from 4 to 10 A, and the thinnest
+interface among them is 10 residues at 4 A against a threshold of 7. These 45 came
+from the confidence-gated smoke fetch rather than a random draw, so this is a hint
+and not a yield estimate; the real numbers come from the run. Per-structure
+counts and timings: `data/curation/interface_sample_45.csv`.
+
 ### Phase 6. Publish
 
 Structures and per-complex tables to the HF bucket under
