@@ -581,7 +581,7 @@ to a follow-up issue if Tracks A and B leave budget or motivation.
 
 - GitHub issue #341 (tagged `experiment`); this directory,
   `exp341_evals_contacts_v1_interpretability/`, on branch
-  `exp/341-interpretability`, with the survey kept as source material.
+  `exp/341-contacts-v1-interpretability`, with the survey kept as source material.
 - `README.md` holding this plan and results as they arrive, with
   `marinfold_experiment` frontmatter (`issue: 341`, `kind: evals`).
 - A shared harness module (model loading with `repair_rope`, hooks, readout,
