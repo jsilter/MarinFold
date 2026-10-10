@@ -216,11 +216,15 @@ seeds, so each protein's shuffle and residue offset are identical across arms.
 
 ### 4.5 Tooling
 
-- HF export loaded with PyTorch `transformers`; hooks through nnsight. Start from
-  #262's `probe_common.py` for document building and model loading.
-- The readout functions above are private (`_`-prefixed). Promote the ones the
-  harness needs to public names in a small separate PR rather than importing
-  private helpers from an experiment.
+- HF export loaded with PyTorch `transformers` through `marinfold`'s transformers
+  backend (`TransformersBackend.from_model`, PR #361). Residual capture and mean
+  ablation use plain torch forward hooks on the decoder layers, `self_attn` and
+  `mlp` (`harness.py`), not nnsight: the harness needs only those three hook
+  points, and plain hooks avoid a dependency whose tracing layer would sit between
+  the readout and the model. Harness check 2 confirms the hooked forward is
+  identical to the plain one.
+- The readout functions above were private (`_`-prefixed); PR #360 promoted the
+  ones the harness needs to public names.
 - 1.47B in bf16 fits one 24 GB GPU for harness development and activation dumps.
   Jacobians and ablation sweeps fan out as independent 1×H100 jobs on CoreWeave,
   following the single-GPU fan-out recipe in `AGENTS.md` (explicit iris client,
@@ -256,15 +260,26 @@ seeds, so each protein's shuffle and residue offset are identical across arms.
 | Legacy 554 ground truth with continuous degree | `data/contacts-v1-model-eval-exp89/gt_universe.jsonl` | 8.0 MB, 554 proteins (median L 148) | B1 probe training, A1 |
 | Homology and fold covariates | `experiments/exp213_evals_train_sequence_overlap_audit/data/eval_train_identity.csv` | 554 rows, in git | A1, A2 |
 | MSA depth | `experiments/exp260_evals_msa_depth_stratified/data/msa_depth.csv` | 402 rows, in git | A1, A2 |
-| #225 drop list | `data/decontamination/contacts_v1_eval_reference/v1/droplist_final.parquet` | 31.5 MB. 77,887 AFDB and 1,047,096 ESM Atlas entries removed | A3, A4 |
+| #225 drop list | `data/decontamination/contacts_v1_eval_reference/v1/droplist_final.parquet` | 31.5 MB. 1,373,423 entries removed: 166,679 AFDB (4.04% of 4,129,682; 23-290 per shard, median 73) and 1,206,744 ESM Atlas. Each row carries `(shard, row)` into the unfiltered corpus, identity, coverage, e-value and nearest eval reference | A3, A4 |
 
 **What has to be built:**
 
 1. **The held-out structure panel (A3, A4).** AFDB entries only, since
-   `afdb-24M` supplies mmCIFs and Foldseek cluster IDs.
-   - Pull removed structures from `timodonnell/afdb-24M` shards (2,000 structures and
-     ~100 MB per shard, mmCIF in `cif_content`; about 1.9% of each shard was removed).
-     Recompute pyconfind contacts, including the continuous degree.
+   `afdb-24M` supplies Foldseek cluster IDs.
+   - *As built (`panel_candidates.py`).* Sequence and ground truth come from the
+     published contacts-v1 documents, not from mmCIF through pyconfind. The drop
+     list's `(shard, row)` pointers locate each removed document in the unfiltered
+     corpus (`data/document_structures/contacts_v1/train`, `entry_id` checked); kept
+     candidates are a seeded sample of the decontaminated corpus at the same shard
+     indices. A document with `truncated = False` emits every contact at degree
+     ≥ 0.001 and separation ≥ 6, so its contact list is the binary ground truth
+     A3 and A4 score. Two consequences: truncated documents are excluded (229 of
+     3.96M kept AFDB documents, all longer than 1,000 residues; B2), and the panel
+     has no continuous degree, which A3 and A4 do not use. Stage 1 reads 300 of
+     2,067 shards, about 24,000 removed candidates before stratification.
+   - *Originally planned.* Pull removed structures from `timodonnell/afdb-24M`
+     shards (mmCIF in `cif_content`) and recompute pyconfind contacts, including the
+     continuous degree.
    - **Kept-relative count.** For each removed structure, the number of sequences in
      the exp232 training corpus at ≥ 30% identity and ≥ 50% coverage, from an
      MMseqs2 search of the removed sequences against the kept corpus (the same search
@@ -287,6 +302,12 @@ seeds, so each protein's shuffle and residue offset are identical across arms.
    A CPU scan of those columns over the exp277 source-document parquets gives the
    truncation rate by length. If a corpus dropped those columns, recompute them from
    the structures for a 10,000-document sample.
+   *Done* (`budget_counts.py`, `data/budget_counts.csv`): both native corpora kept
+   the columns. AFDB: 229 of 3,963,003 documents truncated (5.8e-05; 224 of the 523
+   documents at 1,501-2,000 residues), 7.0e-05 of eligible contacts dropped. ESM
+   Atlas: no document exceeds 1,000 residues and none of 65,553,178 is truncated.
+   The ProteinMPNN redesign corpora (exp266) keep each structure's length and
+   contact set, so they inherit these rates.
 4. **Small outputs.** Only reduced L×L Jacobian maps are stored (~360 KB at L = 300,
    against ~144 MB for the full L×20×L×20 fp32 tensor).
 
@@ -297,8 +318,10 @@ is a cross-region copy that needs explicit sign-off under the AGENTS.md rule.
 
 ### 4.8 Compute and storage estimates
 
-These are planning estimates derived from token counts. None is measured; harness
-check 5 replaces the throughput assumption with a timed pass.
+These are planning estimates derived from token counts. Harness check 5 replaces
+the throughput assumption with a timed pass. Measured so far: 5,933 tokens/s on one
+L40S (eval-val and eval-denovo, 4 seeds, transformers bf16,
+`data/readout_l40s/`); the H100 figure is still outstanding.
 
 **Basis.**
 
