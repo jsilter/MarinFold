@@ -34,7 +34,7 @@ from marinfold.registry import resolve_model_entry
 
 import harness
 
-OUTPUT = Path(__file__).resolve().parent / "data" / "harness_checks.json"
+DEFAULT_OUTPUT = Path(__file__).resolve().parent / "data" / "harness_checks.json"
 # Check 1's divergence criterion for the unrepaired control: mean absolute
 # difference in log P(contact) over resolved candidate pairs. A wrong rope
 # base cost 0.25-1.34 nats/token of document NLL on the #117 checkpoint
@@ -77,6 +77,7 @@ def main() -> int:
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--n-proteins", type=int, default=3)
     parser.add_argument("--seeds", type=int, default=1, help="document seeds per readout (plan default 4)")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
     entry = resolve_model_entry(args.model)
@@ -152,8 +153,8 @@ def main() -> int:
         "proteins": rows,
         "worker": worker_metadata(args.device),
     }
-    OUTPUT.parent.mkdir(exist_ok=True)
-    OUTPUT.write_text(json.dumps(result, indent=2) + "\n")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result["checks"], indent=2))
     return 0 if all(result["checks"].values()) else 1
 

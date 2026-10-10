@@ -126,14 +126,22 @@ def load_eval_proteins(eval_sets: Sequence[str] = ALLOWED_EVAL_SETS) -> list[Eva
     return proteins
 
 
-def load_model(spec: str | None, *, device: str, dtype: str = "bfloat16") -> Backend:
+def load_model(
+    spec: str | None, *, device: str, dtype: str = "bfloat16", tail_batch_size: int = 64
+) -> Backend:
     """Load a MODELS.yaml nickname (``None`` = registry default) with rope repaired.
+
+    ``tail_batch_size`` is the backend's number of ``<contact> <p_i>`` tails
+    per cached forward pass; it trades memory for throughput and does not
+    change the readout beyond batched-matmul rounding.
 
     Raises if the loaded config does not carry the trained rope (theta
     500000, llama3 scaling): activations from such a model come from a
     different network.
     """
-    backend = load_backend("transformers", model=spec, device=device, dtype=dtype)
+    backend = load_backend(
+        "transformers", model=spec, device=device, dtype=dtype, tail_batch_size=tail_batch_size
+    )
     config = backend.model.config
     scaling = config.rope_scaling or {}
     if config.rope_theta != TRAINED_ROPE_THETA or scaling.get("rope_type") != "llama3":
