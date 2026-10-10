@@ -24,7 +24,8 @@ INSTANCE_TYPE=${INSTANCE_TYPE:-p5.4xlarge}  # 1x H100 80GB
 MAX_MINUTES=${MAX_MINUTES:-120}
 REGION=us-west-2
 BUCKET=marinfold-exp91-usw2
-SUBNET=subnet-0a393c46ff06d81c3
+# us-west-2a; us-west-2b is subnet-0563fac5b8bee3f0d (same VPC). p5 capacity varies by zone.
+SUBNET=${SUBNET:-subnet-0a393c46ff06d81c3}
 INSTANCE_PROFILE=marinfold-exp91-instance-profile
 EXP=experiments/exp341_evals_contacts_v1_interpretability
 EXP245=experiments/exp245_evals_foldbench_held_out_monomers/data
