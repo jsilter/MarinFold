@@ -14,7 +14,8 @@
 # Account facts (no key pairs; the instance profile name is not discoverable
 # with this user's IAM permissions) are from the exp91/exp145 EC2 workers.
 #
-# Usage (CloudShell STS credentials expire after ~15 minutes):
+# Usage (CloudShell STS credentials expire after ~15 minutes; REGION and
+# SUBNET must name the same region):
 #   set -a; source experiments/exp341_evals_contacts_v1_interpretability/aws_keys.env; set +a
 #   experiments/exp341_evals_contacts_v1_interpretability/launch_aws.sh
 #   INSTANCE_TYPE=g6e.xlarge experiments/exp341_evals_contacts_v1_interpretability/launch_aws.sh
@@ -22,9 +23,16 @@ set -euo pipefail
 
 INSTANCE_TYPE=${INSTANCE_TYPE:-p5.4xlarge}  # 1x H100 80GB
 MAX_MINUTES=${MAX_MINUTES:-120}
-REGION=us-west-2
+# The instance's region. GPU quota (2026-10): us-east-2 has 192 P / 128 G
+# on-demand vCPUs; us-west-2 has 4 P / 0 G, too few for any GPU type.
+REGION=${REGION:-us-east-2}
+# The bucket stays in us-west-2; code in and results out are tens of MB.
 BUCKET=marinfold-exp91-usw2
-SUBNET=subnet-0a393c46ff06d81c3
+BUCKET_REGION=us-west-2
+# Default subnets: us-east-2a subnet-03f9b7abd4284ad5e, 2b subnet-02c630af81a9bdc13,
+# 2c subnet-091e8c3572c921332; us-west-2a subnet-0a393c46ff06d81c3,
+# 2b subnet-0563fac5b8bee3f0d. Capacity varies by zone, so SUBNET picks one.
+SUBNET=${SUBNET:-subnet-03f9b7abd4284ad5e}
 INSTANCE_PROFILE=marinfold-exp91-instance-profile
 EXP=experiments/exp341_evals_contacts_v1_interpretability
 EXP245=experiments/exp245_evals_foldbench_held_out_monomers/data
@@ -43,7 +51,7 @@ trap 'rm -rf "$work"' EXIT
 
 git archive --format=tar.gz -o "$work/code.tgz" HEAD \
     marinfold "$EXP" "$EXP245/eval_sets.csv" "$EXP245/gt_universe_scored.jsonl"
-aws s3 cp --region "$REGION" "$work/code.tgz" "$s3/code.tgz"
+aws s3 cp --region "$BUCKET_REGION" "$work/code.tgz" "$s3/code.tgz"
 
 ami=$(aws ssm get-parameter --region "$REGION" \
     --name /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id \
@@ -56,6 +64,7 @@ shutdown -h +$MAX_MINUTES
 exec > /var/log/exp341.log 2>&1
 S3=$s3
 export HOME=/root
+export AWS_DEFAULT_REGION=$BUCKET_REGION
 command -v aws >/dev/null || snap install aws-cli --classic
 mkdir -p /opt/run && cd /opt/run
 aws s3 cp \$S3/code.tgz . && tar xzf code.tgz
