@@ -45,8 +45,8 @@ moved to section 10.
   single-sequence at 0.547. exp213's MMseqs2 search also records a training-hit
   count per eval protein.
 - **#245 H2** (`experiments/exp245_evals_foldbench_held_out_monomers/`). The
-  contaminated #199 cooldown drops +0.024 more from eval-val to eval-test than the
-  #232 checkpoints do, 95% CI [−0.022, +0.073]: a behavioural contamination test on
+  contaminated \#199 cooldown drops +0.024 more from eval-val to eval-test than the
+  \#232 checkpoints do, 95% CI [−0.022, +0.073]: a behavioural contamination test on
   eval proteins that does not resolve the effect.
 - **#224** (`experiments/exp224_evals_does_marinfold_fold_a_circularly_permuted/`).
   A circular permutation of DsbA (1UN2) costs 0.093 R-precision against an
@@ -62,7 +62,7 @@ moved to section 10.
 - **#262** (`experiments/exp262_models_nope_token_smearing/`). Its Phase 0 probes
   (`probe_attention.py`, `probe_common.py`) already load contacts-v1 checkpoints
   with hooks and build teacher-forced documents from exp245 ground truth; the harness
-  here starts from `probe_common.py`. #262 also reports that MarinFold's contact
+  here starts from `probe_common.py`. \#262 also reports that MarinFold's contact
   enrichment scales as L^0.79 against ESMFold2's L^1.15, which Track B's budget
   analysis bears on.
 
