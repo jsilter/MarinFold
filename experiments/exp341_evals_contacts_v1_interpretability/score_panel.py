@@ -16,6 +16,16 @@ P(contact) matrices go to ``pcontact.npz`` beside it for the A4 Jacobian
 subset. Proteins are scored in panel order; a model whose ``scores.csv``
 already exists is skipped, so a rerun resumes per model.
 
+Tail batch size adapts to each protein. ``next_token_probs`` replicates the
+prefix KV cache once per tail in a batch, so a batch of b tails over a
+P-token prefix holds b * P * (layers * 2 * kv_heads * head_dim * 2 bytes);
+for this architecture 49,152 bytes per token. The panel's longest prefix
+(3,109 tokens at L = 1,551) needs 36 GiB at b = 256, which ran a 44 GiB L40S
+out of memory. Each protein gets the largest power of two up to
+``--tail-batch-size`` whose replicated cache fits ``--kv-budget-gib``, through
+``TransformersBackend.from_model`` wrappers around the one loaded model. The
+batch size changes only how tails are grouped, not the scores.
+
     uv run python score_panel.py --device cuda --output-dir out/panel \
         --models contacts-v1-exp232-m2-p06-train-1.5B contacts-v1-exp199-cooldown-1.5B
 """
@@ -31,6 +41,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from marinfold.document_structures.contacts_v1.inference import prefix_and_positions
 from marinfold.registry import resolve_model_entry
 
 import harness
@@ -38,6 +49,30 @@ from time_readout import forward_tokens, gpu_columns
 
 DATA = Path(__file__).resolve().parent / "data"
 MODELS = ("contacts-v1-exp232-m2-p06-train-1.5B", "contacts-v1-exp199-cooldown-1.5B")
+
+
+def kv_bytes_per_token(model: torch.nn.Module) -> int:
+    config = model.config
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    element = torch.finfo(model.dtype).bits // 8
+    return config.num_hidden_layers * 2 * config.num_key_value_heads * head_dim * element
+
+
+def max_prefix_tokens(backend, protein: harness.EvalProtein, seeds: int) -> int:
+    lengths = []
+    for k in range(seeds):
+        entry_id = protein.stem if seeds == 1 else f"{protein.stem}#cv1ens{k}"
+        prefix, _, _ = prefix_and_positions(protein.structure, entry_id=entry_id)
+        lengths.append(len(backend.tokenizer.encode(prefix, add_special_tokens=False)))
+    return max(lengths)
+
+
+def tail_batch_for(prefix_tokens: int, per_token: int, args) -> int:
+    fits = int(args.kv_budget_gib * 2**30 // (prefix_tokens * per_token))
+    batch = 1
+    while batch * 2 <= min(fits, args.tail_batch_size):
+        batch *= 2
+    return batch
 
 
 def score_model(nickname: str, proteins: list[harness.EvalProtein], panel: pd.DataFrame, args) -> None:
@@ -59,16 +94,25 @@ def score_model(nickname: str, proteins: list[harness.EvalProtein], panel: pd.Da
         "platform": platform.platform(),
         "torch_version": torch.__version__,
         "n_seeds": args.seeds,
-        "tail_batch_size": args.tail_batch_size,
     }
-    harness.pcontact(backend, proteins[0], seeds=1)  # untimed warm-up
+    per_token = kv_bytes_per_token(backend.model)
+    wrappers = {args.tail_batch_size: backend}
+
+    def backend_for(protein: harness.EvalProtein) -> tuple[object, int]:
+        batch = tail_batch_for(max_prefix_tokens(backend, protein, args.seeds), per_token, args)
+        if batch not in wrappers:
+            wrappers[batch] = type(backend).from_model(backend.model, backend.tokenizer, tail_batch_size=batch)
+        return wrappers[batch], batch
+
+    harness.pcontact(backend_for(proteins[0])[0], proteins[0], seeds=1)  # untimed warm-up
     if args.device.startswith("cuda"):
         torch.cuda.synchronize()
 
     rows, matrices = [], {}
     for done, (protein, meta) in enumerate(zip(proteins, panel.itertuples(index=False)), start=1):
+        scorer, batch = backend_for(protein)
         start = time.perf_counter()
-        score = harness.pcontact(backend, protein, seeds=args.seeds)
+        score = harness.pcontact(scorer, protein, seeds=args.seeds)
         elapsed = time.perf_counter() - start
         matrices[protein.stem] = score.astype(np.float16)
         rows.append({
@@ -85,6 +129,7 @@ def score_model(nickname: str, proteins: list[harness.EvalProtein], panel: pd.Da
             "elapsed_seconds": round(elapsed, 3),
             "total_seconds": round(time.perf_counter() - start, 3),
             "forward_tokens": forward_tokens(backend, protein, args.seeds),
+            "tail_batch_size": batch,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             **static,
         })
@@ -96,7 +141,7 @@ def score_model(nickname: str, proteins: list[harness.EvalProtein], panel: pd.Da
     scores = pd.DataFrame(rows)
     scores.to_csv(out_dir / "scores.csv", index=False)
     print(scores.groupby(["bin", "set"])[["r_precision", "r_precision_long"]].mean().round(4), flush=True)
-    del backend
+    del backend, wrappers
     if args.device.startswith("cuda"):
         torch.cuda.empty_cache()
 
@@ -107,7 +152,8 @@ def main() -> int:
     parser.add_argument("--panel", type=Path, default=DATA / "panel.parquet")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seeds", type=int, default=harness.DEFAULT_SEEDS)
-    parser.add_argument("--tail-batch-size", type=int, default=256)
+    parser.add_argument("--tail-batch-size", type=int, default=256, help="upper bound on tails per forward")
+    parser.add_argument("--kv-budget-gib", type=float, default=16.0, help="cap on the replicated prefix KV cache")
     parser.add_argument("--runner-tag", default="local")
     parser.add_argument("--limit", type=int, default=None, help="score only the first N structures (smoke test)")
     parser.add_argument("--output-dir", type=Path, required=True)

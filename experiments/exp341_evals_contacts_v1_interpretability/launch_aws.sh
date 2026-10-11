@@ -109,7 +109,7 @@ STEPS
     panel)
         steps=$(cat <<'STEPS'
 nvidia-smi
-uv run python score_panel.py --device cuda --runner-tag aws --output-dir out/panel
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python score_panel.py --device cuda --runner-tag aws --output-dir out/panel
 rc_a=$?
 rc_b=0
 STEPS
