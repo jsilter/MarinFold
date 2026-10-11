@@ -9,9 +9,10 @@ resolve URLs fetches only the parquet footer and the requested column chunks.
 
 Requests carry the caller's Hugging Face credentials through
 ``huggingface_hub.utils.build_hf_headers`` (the same headers
-``marinfold.registry`` uses), which raises the per-account rate limit over
-anonymous access. A 429 is retried with exponential backoff; any other error
-propagates.
+``marinfold.registry`` uses) when the caller is logged in, which raises the
+per-account rate limit; EC2 workers have no token and read anonymously. A 429
+is retried with backoff for up to ~1 h, long enough to outlast an anonymous
+rate-limit window; any other error propagates.
 """
 
 import time
@@ -26,7 +27,7 @@ from huggingface_hub.utils import build_hf_headers
 
 BUCKET = "open-athena/MarinFold"
 ENDPOINT = "https://huggingface.co"
-RETRY_DELAYS_SECONDS = (15, 30, 60, 120, 240)
+RETRY_DELAYS_SECONDS = (15, 30, 60, 120, 240, 480, 900, 900, 900)
 
 
 def list_parquet(prefix: str) -> list[str]:

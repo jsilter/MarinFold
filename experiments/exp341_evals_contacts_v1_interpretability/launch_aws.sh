@@ -98,7 +98,7 @@ STEPS
         aws s3 cp --region "$BUCKET_REGION" "$CANDIDATES" "$s3/candidates.parquet"
         steps=$(cat <<'STEPS'
 aws s3 cp $S3/candidates.parquet /data/candidates.parquet
-uv run python relative_counts.py --candidates /data/candidates.parquet --work /data/rel --workers 8
+uv run python relative_counts.py --candidates /data/candidates.parquet --work /data/rel --workers 2
 rc_a=$?
 mkdir -p out && cp /data/rel/relative_counts.parquet out/ 2>/dev/null
 rc_b=$?
