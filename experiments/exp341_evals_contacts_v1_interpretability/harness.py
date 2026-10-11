@@ -25,6 +25,9 @@ need around it:
 - **Eval proteins.** :func:`load_eval_proteins` reads exp245's FoldBench
   monomers (eval-val, eval-denovo) from the committed exp245 data directory.
   eval-test has a logged read budget and is refused here.
+- **Held-out panel.** :func:`load_panel_proteins` reads the A3/A4 panel
+  (``panel_select.py``) into the same :class:`EvalProtein` shape, so panel
+  and eval proteins go through one readout and one metric.
 - **Metric.** :func:`r_precision` scores a P(contact) matrix over the
   resolved-residue pair universe, the convention exp89's
   ``compute_metrics.py`` and the exp245 headline numbers use (pairs touching
@@ -123,6 +126,31 @@ def load_eval_proteins(eval_sets: Sequence[str] = ALLOWED_EVAL_SETS) -> list[Eva
         structure = ContactStructure(entry_id=row.stem, residues=residues, gt_contacts=contacts)
         resolved = np.asarray(record["resolved"], dtype=np.int64)
         proteins.append(EvalProtein(eval_set=row.eval_set, structure=structure, resolved=resolved))
+    return proteins
+
+
+def load_panel_proteins(path: Path) -> list[EvalProtein]:
+    """Read the A3/A4 panel parquet; ``eval_set`` is ``panel-removed`` or ``panel-kept``.
+
+    Panel ground truth is the contact list of an untruncated contacts-v1
+    document: every pair at degree >= 0.001 and separation >= 6, with the
+    degree itself not recorded. Each contact is given degree 1.0, which only
+    has to clear the readout's 0.001 floor. AFDB models have coordinates for
+    every residue, so all residues count as resolved.
+    """
+    panel = pd.read_parquet(path)
+    proteins = []
+    for row in panel.itertuples(index=False):
+        residues = residues_from_sequence(row.sequence)
+        if len(residues) != row.seq_len:
+            raise ValueError(f"{row.entry_id}: sequence has {len(residues)} residues, seq_len={row.seq_len}")
+        contacts = tuple(RawContact(int(i), int(j), 1.0) for i, j in row.contacts)
+        structure = ContactStructure(
+            entry_id=row.entry_id, residues=residues, gt_contacts=contacts, global_plddt=float(row.global_plddt)
+        )
+        proteins.append(
+            EvalProtein(eval_set=f"panel-{row.set}", structure=structure, resolved=np.arange(row.seq_len))
+        )
     return proteins
 
 

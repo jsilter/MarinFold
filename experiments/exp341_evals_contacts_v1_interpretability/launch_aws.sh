@@ -5,6 +5,8 @@
 #   harness    GPU. Harness checks 1-2 at the plan's 4 seeds on CUDA
 #              (check_harness.py) and check 5, the timed clean readout over
 #              eval-val and eval-denovo (time_readout.py).
+#   panel      GPU. A3/A4 readouts (score_panel.py): exp232 and exp199 on the
+#              1,000 removed + 1,000 kept structures of data/panel.parquet.
 #   relatives  CPU. Panel stage 2 (relative_counts.py): decode exp232's
 #              training sequences from the HF bucket and MMseqs2-search the
 #              stage 1 candidates (CANDIDATES=path/to/candidates.parquet).
@@ -28,7 +30,7 @@
 #   CANDIDATES=/path/candidates.parquet experiments/exp341_evals_contacts_v1_interpretability/launch_aws.sh relatives
 set -euo pipefail
 
-JOB=${1:?usage: launch_aws.sh harness|relatives}
+JOB=${1:?usage: launch_aws.sh harness|panel|relatives}
 # The bucket stays in us-west-2; harness inputs and outputs are tens of MB.
 BUCKET=marinfold-exp91-usw2
 BUCKET_REGION=us-west-2
@@ -49,6 +51,16 @@ case "$JOB" in
         DISK_GB=150
         AMI_PARAMETER=/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id
         ;;
+    panel)
+        # ~1.4 L40S-hours per model, extrapolated from check 5's eval-val
+        # timings to the panel's lengths (mean 430, max 1,551).
+        INSTANCE_TYPE=${INSTANCE_TYPE:-g6e.xlarge}  # 1x L40S 48GB
+        REGION=${REGION:-us-east-2}
+        SUBNET=${SUBNET:-subnet-03f9b7abd4284ad5e}
+        MAX_MINUTES=${MAX_MINUTES:-360}
+        DISK_GB=150
+        AMI_PARAMETER=/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id
+        ;;
     relatives)
         # CPU, next to the bucket. 256 GB RAM keeps the MMseqs2 prefilter from
         # splitting heavily; the disk holds ~40 GB of FASTA, the target DB and
@@ -62,7 +74,7 @@ case "$JOB" in
         : "${CANDIDATES:?set CANDIDATES to the stage 1 candidates.parquet}"
         ;;
     *)
-        echo "unknown job $JOB (harness|relatives)" >&2
+        echo "unknown job $JOB (harness|panel|relatives)" >&2
         exit 1
         ;;
 esac
@@ -91,6 +103,15 @@ uv run python check_harness.py --device cuda --seeds 4 --output out/harness_chec
 rc_a=$?
 uv run python time_readout.py --device cuda --runner-tag aws --output-dir out/readout
 rc_b=$?
+STEPS
+)
+        ;;
+    panel)
+        steps=$(cat <<'STEPS'
+nvidia-smi
+uv run python score_panel.py --device cuda --runner-tag aws --output-dir out/panel
+rc_a=$?
+rc_b=0
 STEPS
 )
         ;;
