@@ -75,6 +75,28 @@ def tail_batch_for(prefix_tokens: int, per_token: int, args) -> int:
     return batch
 
 
+class BatchSizedBackends:
+    """``from_model`` wrappers around one loaded backend, one per tail batch size.
+
+    ``args`` supplies ``seeds``, ``tail_batch_size`` and ``kv_budget_gib``.
+    """
+
+    def __init__(self, backend, args):
+        self.backend = backend
+        self.args = args
+        self.per_token = kv_bytes_per_token(backend.model)
+        self.wrappers = {args.tail_batch_size: backend}
+
+    def for_protein(self, protein: harness.EvalProtein) -> tuple[object, int]:
+        prefix_tokens = max_prefix_tokens(self.backend, protein, self.args.seeds)
+        batch = tail_batch_for(prefix_tokens, self.per_token, self.args)
+        if batch not in self.wrappers:
+            self.wrappers[batch] = type(self.backend).from_model(
+                self.backend.model, self.backend.tokenizer, tail_batch_size=batch
+            )
+        return self.wrappers[batch], batch
+
+
 def score_model(nickname: str, proteins: list[harness.EvalProtein], panel: pd.DataFrame, args) -> None:
     out_dir = args.output_dir / nickname
     if (out_dir / "scores.csv").exists():
@@ -95,22 +117,14 @@ def score_model(nickname: str, proteins: list[harness.EvalProtein], panel: pd.Da
         "torch_version": torch.__version__,
         "n_seeds": args.seeds,
     }
-    per_token = kv_bytes_per_token(backend.model)
-    wrappers = {args.tail_batch_size: backend}
-
-    def backend_for(protein: harness.EvalProtein) -> tuple[object, int]:
-        batch = tail_batch_for(max_prefix_tokens(backend, protein, args.seeds), per_token, args)
-        if batch not in wrappers:
-            wrappers[batch] = type(backend).from_model(backend.model, backend.tokenizer, tail_batch_size=batch)
-        return wrappers[batch], batch
-
-    harness.pcontact(backend_for(proteins[0])[0], proteins[0], seeds=1)  # untimed warm-up
+    sized = BatchSizedBackends(backend, args)
+    harness.pcontact(sized.for_protein(proteins[0])[0], proteins[0], seeds=1)  # untimed warm-up
     if args.device.startswith("cuda"):
         torch.cuda.synchronize()
 
     rows, matrices = [], {}
     for done, (protein, meta) in enumerate(zip(proteins, panel.itertuples(index=False)), start=1):
-        scorer, batch = backend_for(protein)
+        scorer, batch = sized.for_protein(protein)
         start = time.perf_counter()
         score = harness.pcontact(scorer, protein, seeds=args.seeds)
         elapsed = time.perf_counter() - start
@@ -141,7 +155,7 @@ def score_model(nickname: str, proteins: list[harness.EvalProtein], panel: pd.Da
     scores = pd.DataFrame(rows)
     scores.to_csv(out_dir / "scores.csv", index=False)
     print(scores.groupby(["bin", "set"])[["r_precision", "r_precision_long"]].mean().round(4), flush=True)
-    del backend, wrappers
+    del backend, sized
     if args.device.startswith("cuda"):
         torch.cuda.empty_cache()
 

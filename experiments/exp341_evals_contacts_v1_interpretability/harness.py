@@ -25,6 +25,8 @@ need around it:
 - **Eval proteins.** :func:`load_eval_proteins` reads exp245's FoldBench
   monomers (eval-val, eval-denovo) from the committed exp245 data directory.
   eval-test has a logged read budget and is refused here.
+- **Legacy proteins.** :func:`load_legacy_proteins` reads the legacy-554
+  subset A2 uses (``a2_select.py``).
 - **Held-out panel.** :func:`load_panel_proteins` reads the A3/A4 panel
   (``panel_select.py``) into the same :class:`EvalProtein` shape, so panel
   and eval proteins go through one readout and one metric.
@@ -45,6 +47,7 @@ Backends here are always the transformers backend (``load_backend(
 """
 
 import contextlib
+import gzip
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -126,6 +129,32 @@ def load_eval_proteins(eval_sets: Sequence[str] = ALLOWED_EVAL_SETS) -> list[Eva
         structure = ContactStructure(entry_id=row.stem, residues=residues, gt_contacts=contacts)
         resolved = np.asarray(record["resolved"], dtype=np.int64)
         proteins.append(EvalProtein(eval_set=row.eval_set, structure=structure, resolved=resolved))
+    return proteins
+
+
+def load_legacy_proteins(path: Path) -> list[EvalProtein]:
+    """Read legacy-554 proteins from ``a2_select.py``'s gzipped JSONL; ``eval_set`` is ``legacy-<dataset>``.
+
+    Each record carries exp89's ground truth (``gt_universe.jsonl``: 0-based
+    ``contacts`` with continuous degree and ``resolved``, the same convention
+    as exp245's file) and exp213's query sequence. The stem is
+    ``<dataset>__<stem>``, as in exp213, because legacy stems are not unique
+    across datasets.
+    """
+    proteins = []
+    with gzip.open(path, "rt") as handle:
+        for line in handle:
+            record = json.loads(line)
+            residues = residues_from_sequence(record["sequence"])
+            if len(residues) != record["L"]:
+                raise ValueError(f"{record['key']}: sequence has {len(residues)} residues, ground truth L={record['L']}")
+            contacts = tuple(RawContact(i, j, degree) for i, j, degree in record["contacts"])
+            structure = ContactStructure(entry_id=record["key"], residues=residues, gt_contacts=contacts)
+            proteins.append(EvalProtein(
+                eval_set=f"legacy-{record['dataset']}",
+                structure=structure,
+                resolved=np.asarray(record["resolved"], dtype=np.int64),
+            ))
     return proteins
 
 

@@ -7,6 +7,9 @@
 #              eval-val and eval-denovo (time_readout.py).
 #   panel      GPU. A3/A4 readouts (score_panel.py): exp232 and exp199 on the
 #              1,000 removed + 1,000 kept structures of data/panel.parquet.
+#   a2         GPU. A2 contact Jacobian (a2_contact_jacobian.py) on exp277, one
+#              shard of data/a2_proteins.csv: SHARD=<i> N_SHARDS=<n>. Launch
+#              one instance per shard; out/ is synced to S3 every 10 minutes.
 #   relatives  CPU. Panel stage 2 (relative_counts.py): decode exp232's
 #              training sequences from the HF bucket and MMseqs2-search the
 #              stage 1 candidates (CANDIDATES=path/to/candidates.parquet).
@@ -30,7 +33,7 @@
 #   CANDIDATES=/path/candidates.parquet experiments/exp341_evals_contacts_v1_interpretability/launch_aws.sh relatives
 set -euo pipefail
 
-JOB=${1:?usage: launch_aws.sh harness|panel|relatives}
+JOB=${1:?usage: launch_aws.sh harness|panel|a2|relatives}
 # The bucket stays in us-west-2; harness inputs and outputs are tens of MB.
 BUCKET=marinfold-exp91-usw2
 BUCKET_REGION=us-west-2
@@ -61,6 +64,17 @@ case "$JOB" in
         DISK_GB=150
         AMI_PARAMETER=/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id
         ;;
+    a2)
+        # ~19.5 L40S-hours over all shards at one seed (a2_select.py).
+        INSTANCE_TYPE=${INSTANCE_TYPE:-g6e.xlarge}  # 1x L40S 48GB
+        REGION=${REGION:-us-east-2}
+        SUBNET=${SUBNET:-subnet-03f9b7abd4284ad5e}
+        MAX_MINUTES=${MAX_MINUTES:-480}
+        DISK_GB=150
+        AMI_PARAMETER=/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id
+        : "${SHARD:?set SHARD (0-based) for the a2 job}"
+        : "${N_SHARDS:?set N_SHARDS for the a2 job}"
+        ;;
     relatives)
         # CPU, next to the bucket. 256 GB RAM keeps the MMseqs2 prefilter from
         # splitting heavily; the disk holds ~40 GB of FASTA, the target DB and
@@ -74,7 +88,7 @@ case "$JOB" in
         : "${CANDIDATES:?set CANDIDATES to the stage 1 candidates.parquet}"
         ;;
     *)
-        echo "unknown job $JOB (harness|panel|relatives)" >&2
+        echo "unknown job $JOB (harness|panel|a2|relatives)" >&2
         exit 1
         ;;
 esac
@@ -86,7 +100,7 @@ if ! git diff --quiet HEAD -- marinfold "$EXP"; then
     exit 1
 fi
 sha=$(git rev-parse --short HEAD)
-prefix="exp341/$JOB/$(date -u +%Y%m%dT%H%M%SZ)-$sha"
+prefix="exp341/$JOB/$(date -u +%Y%m%dT%H%M%SZ)-$sha${SHARD:+-shard$SHARD}"
 s3="s3://$BUCKET/$prefix"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -115,6 +129,17 @@ rc_b=0
 STEPS
 )
         ;;
+    a2)
+        steps=$(cat <<'STEPS'
+nvidia-smi
+mkdir -p out
+(while sleep 600; do aws s3 sync --quiet out $S3/out; done) &
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python a2_contact_jacobian.py --device cuda --runner-tag aws --shard $SHARD --n-shards $N_SHARDS --output-dir out/a2
+rc_a=$?
+rc_b=0
+STEPS
+)
+        ;;
     relatives)
         aws s3 cp --region "$BUCKET_REGION" "$CANDIDATES" "$s3/candidates.parquet"
         steps=$(cat <<'STEPS'
@@ -134,6 +159,8 @@ set -uo pipefail
 shutdown -h +$MAX_MINUTES
 exec > /var/log/exp341.log 2>&1
 S3=$s3
+SHARD=${SHARD:-}
+N_SHARDS=${N_SHARDS:-}
 export HOME=/root
 export AWS_DEFAULT_REGION=$BUCKET_REGION
 command -v aws >/dev/null || snap install aws-cli --classic
