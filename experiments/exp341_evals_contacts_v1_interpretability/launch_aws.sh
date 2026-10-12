@@ -12,7 +12,8 @@
 #              one instance per shard; out/ is synced to S3 every 10 minutes.
 #              RESUME_FROM=s3://.../<earlier shard prefix> seeds out/ from a
 #              failed run, and the driver skips proteins it already wrote.
-#              A2_ARGS adds driver flags (e.g. "--dtype float32 --keys ...").
+#              A2_ARGS adds driver flags (e.g. "--dtype float32 --keys ...");
+#              TAG adds a label to the S3 prefix.
 #   relatives  CPU. Panel stage 2 (relative_counts.py): decode exp232's
 #              training sequences from the HF bucket and MMseqs2-search the
 #              stage 1 candidates (CANDIDATES=path/to/candidates.parquet).
@@ -103,7 +104,7 @@ if ! git diff --quiet HEAD -- marinfold "$EXP"; then
     exit 1
 fi
 sha=$(git rev-parse --short HEAD)
-prefix="exp341/$JOB/$(date -u +%Y%m%dT%H%M%SZ)-$sha${SHARD:+-shard$SHARD}"
+prefix="exp341/$JOB/$(date -u +%Y%m%dT%H%M%SZ)-$sha${TAG:+-$TAG}${SHARD:+-shard$SHARD}"
 s3="s3://$BUCKET/$prefix"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

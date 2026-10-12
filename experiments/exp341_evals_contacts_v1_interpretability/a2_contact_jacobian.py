@@ -181,15 +181,22 @@ def main() -> int:
     parser.add_argument("--n-shards", type=int, default=1)
     parser.add_argument("--tail-batch-size", type=int, default=256, help="upper bound on tails per forward")
     parser.add_argument("--kv-budget-gib", type=float, default=16.0, help="cap on the replicated prefix KV cache")
+    parser.add_argument("--proteins", choices=("eval", "panel"), default="eval",
+                        help="eval: data/a2_proteins.csv; panel: the A4 subset in data/a2_panel_proteins.csv")
     parser.add_argument("--keys", nargs="*", default=None, help="run only these protein keys (smoke test)")
     parser.add_argument("--runner-tag", default="local")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
 
-    table = pd.read_csv(DATA / "a2_proteins.csv")
+    if args.proteins == "eval":
+        table = pd.read_csv(DATA / "a2_proteins.csv")
+        loaded = harness.load_eval_proteins() + harness.load_legacy_proteins(DATA / "a2_legacy_gt.jsonl.gz")
+    else:
+        table = pd.read_csv(DATA / "a2_panel_proteins.csv")
+        loaded = harness.load_panel_proteins(DATA / "panel.parquet")
     table["shard"] = assign_shards(table, args.n_shards)
     wanted = table[table["shard"] == args.shard] if args.keys is None else table[table["key"].isin(args.keys)]
-    proteins = {p.stem: p for p in harness.load_eval_proteins() + harness.load_legacy_proteins(DATA / "a2_legacy_gt.jsonl.gz")}
+    proteins = {p.stem: p for p in loaded if p.stem in set(wanted["key"])}
     todo = [proteins[key] for key in wanted.sort_values("est_l40s_seconds", ascending=False)["key"]]
 
     entry = resolve_model_entry(args.model)
