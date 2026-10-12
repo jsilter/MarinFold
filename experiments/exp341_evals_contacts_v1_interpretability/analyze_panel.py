@@ -19,6 +19,14 @@ has no true contact in the band (R-precision NaN) are dropped for that band.
 - **A4** (``data/contamination_did.csv``): per bin, the difference in
   differences (exp199 - exp232 on removed) - (exp199 - exp232 on kept), and
   each of its two terms.
+- **Removed-vs-kept gap checks** (``data/removed_gap_checks.json``). exp232
+  scores removed structures above their matched kept controls. Two candidate
+  explanations are tested: removed structures being easier because they
+  resemble eval proteins (exp232's removed R-precision against the drop
+  list's identity to the nearest eval reference, raw by quartile and adjusted
+  for length, pLDDT and relative count), and contact density or long-range
+  share differing within pairs (the per-pair gap regressed on both
+  differences; the intercept is the gap left over).
 
     uv run python analyze_panel.py
 """
@@ -69,6 +77,42 @@ def piecewise_breakpoint(x: np.ndarray, y: np.ndarray, candidates: np.ndarray) -
         if sse < best_sse:
             best, best_sse = knot, sse
     return float(best)
+
+
+def gap_checks() -> dict:
+    panel = pd.read_parquet(DATA / "panel.parquet")
+    scores = pd.read_csv(DATA / "panel_scores" / EXP232 / "scores.csv", dtype={"bin": str})
+    frame = panel.merge(scores[["stem", "r_precision"]], left_on="entry_id", right_on="stem")
+    frame["density"] = frame["contacts"].map(len) / frame["seq_len"]
+    frame["long_share"] = [np.mean([j - i >= 24 for i, j in c]) for c in frame["contacts"]]
+
+    removed = frame[frame["set"] == "removed"].dropna(subset=["r_precision"])
+    quartile = pd.qcut(removed["identity"], 4)
+    by_quartile = removed.groupby(quartile, observed=True)["r_precision"].agg(["size", "mean"])
+    design = np.column_stack([
+        np.ones(len(removed)), removed["identity"], np.log(removed["seq_len"]),
+        removed["global_plddt"], np.log1p(removed["n_relatives"]),
+    ])
+    identity_coef = np.linalg.lstsq(design, removed["r_precision"].to_numpy(), rcond=None)[0][1]
+
+    wide = frame.pivot(index="pair", columns="set", values=["density", "long_share", "r_precision"]).dropna()
+    gap = (wide["r_precision"]["removed"] - wide["r_precision"]["kept"]).to_numpy()
+    d_density = (wide["density"]["removed"] - wide["density"]["kept"]).to_numpy()
+    d_long = (wide["long_share"]["removed"] - wide["long_share"]["kept"]).to_numpy()
+    coef = np.linalg.lstsq(np.column_stack([np.ones(len(gap)), d_density, d_long]), gap, rcond=None)[0]
+    return {
+        "identity_quartiles": [
+            {"identity": str(interval), "n": int(row["size"]), "exp232_removed_r_precision": float(row["mean"])}
+            for interval, row in by_quartile.iterrows()
+        ],
+        "identity_coef_adjusted": float(identity_coef),
+        "identity_spearman": float(removed[["identity", "r_precision"]].corr("spearman").iloc[0, 1]),
+        "pairs": len(gap),
+        "mean_gap": float(gap.mean()),
+        "mean_density_difference": float(d_density.mean()),
+        "mean_long_share_difference": float(d_long.mean()),
+        "gap_after_density_and_long_share": float(coef[0]),
+    }
 
 
 def main() -> int:
@@ -129,11 +173,14 @@ def main() -> int:
             "adjusted_coef_plddt": float(coef[3]),
         }
     (DATA / "relative_dose_fit.json").write_text(json.dumps(fits, indent=2) + "\n")
+    checks = gap_checks()
+    (DATA / "removed_gap_checks.json").write_text(json.dumps(checks, indent=2) + "\n")
 
     pd.set_option("display.width", 200)
     print(dose.round(3).to_string(index=False))
     print(did.round(3).to_string(index=False))
     print(json.dumps(fits, indent=2))
+    print(json.dumps(checks, indent=2))
     return 0
 
 

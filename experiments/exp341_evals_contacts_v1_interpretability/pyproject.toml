@@ -15,6 +15,7 @@ dependencies = [
     "aiohttp",  # fsspec HTTP range reads of public HF bucket parquets
     "pyarrow",
     "scipy",  # optimal matching for the A3/A4 panel
+    "matplotlib",
 ]
 
 [project.optional-dependencies]
