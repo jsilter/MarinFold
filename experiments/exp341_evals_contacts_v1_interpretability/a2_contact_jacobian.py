@@ -175,6 +175,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default=None, help="MODELS.yaml nickname (default: registry default, exp277)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--dtype", default="bfloat16", help="model dtype; float32 measures bf16 rounding in ΔP")
     parser.add_argument("--seeds", type=int, default=1)
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--n-shards", type=int, default=1)
@@ -193,7 +194,9 @@ def main() -> int:
 
     entry = resolve_model_entry(args.model)
     load_start = time.perf_counter()
-    backend = harness.load_model(args.model, device=args.device, tail_batch_size=args.tail_batch_size)
+    backend = harness.load_model(
+        args.model, device=args.device, dtype=args.dtype, tail_batch_size=args.tail_batch_size
+    )
     model_load_seconds = time.perf_counter() - load_start
     sized = BatchSizedBackends(backend, args)
 
@@ -201,7 +204,7 @@ def main() -> int:
         return sized.for_protein(protein)[0]
 
     static = {
-        "mode": f"a2-{len(SUBSTITUTIONS)}sub-{args.seeds}seed",
+        "mode": f"a2-{len(SUBSTITUTIONS)}sub-{args.seeds}seed-{args.dtype}",
         "model_load_seconds": round(model_load_seconds, 2),
         "model_nickname": entry.nickname,
         "runner_tag": args.runner_tag,
@@ -210,6 +213,8 @@ def main() -> int:
         "platform": platform.platform(),
         "torch_version": torch.__version__,
         "n_seeds": args.seeds,
+        "dtype": args.dtype,
+        "tail_batch_size": args.tail_batch_size,
     }
     for directory in ("proteins", "contacts", "timings"):
         (args.output_dir / directory).mkdir(parents=True, exist_ok=True)

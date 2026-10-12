@@ -12,6 +12,7 @@
 #              one instance per shard; out/ is synced to S3 every 10 minutes.
 #              RESUME_FROM=s3://.../<earlier shard prefix> seeds out/ from a
 #              failed run, and the driver skips proteins it already wrote.
+#              A2_ARGS adds driver flags (e.g. "--dtype float32 --keys ...").
 #   relatives  CPU. Panel stage 2 (relative_counts.py): decode exp232's
 #              training sequences from the HF bucket and MMseqs2-search the
 #              stage 1 candidates (CANDIDATES=path/to/candidates.parquet).
@@ -137,7 +138,7 @@ nvidia-smi
 mkdir -p out
 [ -n "$RESUME_FROM" ] && aws s3 sync --quiet $RESUME_FROM/out out
 (while sleep 600; do aws s3 sync --quiet out $S3/out; done) &
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python a2_contact_jacobian.py --device cuda --runner-tag aws --shard $SHARD --n-shards $N_SHARDS --output-dir out/a2
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python a2_contact_jacobian.py --device cuda --runner-tag aws --shard $SHARD --n-shards $N_SHARDS --output-dir out/a2 $A2_ARGS
 rc_a=$?
 rc_b=0
 STEPS
@@ -165,6 +166,7 @@ S3=$s3
 SHARD=${SHARD:-}
 N_SHARDS=${N_SHARDS:-}
 RESUME_FROM=${RESUME_FROM:-}
+A2_ARGS="${A2_ARGS:-}"
 export HOME=/root
 export AWS_DEFAULT_REGION=$BUCKET_REGION
 command -v aws >/dev/null || snap install aws-cli --classic
