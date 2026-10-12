@@ -10,6 +10,8 @@
 #   a2         GPU. A2 contact Jacobian (a2_contact_jacobian.py) on exp277, one
 #              shard of data/a2_proteins.csv: SHARD=<i> N_SHARDS=<n>. Launch
 #              one instance per shard; out/ is synced to S3 every 10 minutes.
+#              RESUME_FROM=s3://.../<earlier shard prefix> seeds out/ from a
+#              failed run, and the driver skips proteins it already wrote.
 #   relatives  CPU. Panel stage 2 (relative_counts.py): decode exp232's
 #              training sequences from the HF bucket and MMseqs2-search the
 #              stage 1 candidates (CANDIDATES=path/to/candidates.parquet).
@@ -133,6 +135,7 @@ STEPS
         steps=$(cat <<'STEPS'
 nvidia-smi
 mkdir -p out
+[ -n "$RESUME_FROM" ] && aws s3 sync --quiet $RESUME_FROM/out out
 (while sleep 600; do aws s3 sync --quiet out $S3/out; done) &
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python a2_contact_jacobian.py --device cuda --runner-tag aws --shard $SHARD --n-shards $N_SHARDS --output-dir out/a2
 rc_a=$?
@@ -161,6 +164,7 @@ exec > /var/log/exp341.log 2>&1
 S3=$s3
 SHARD=${SHARD:-}
 N_SHARDS=${N_SHARDS:-}
+RESUME_FROM=${RESUME_FROM:-}
 export HOME=/root
 export AWS_DEFAULT_REGION=$BUCKET_REGION
 command -v aws >/dev/null || snap install aws-cli --classic
