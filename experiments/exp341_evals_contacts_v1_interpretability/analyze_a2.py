@@ -15,7 +15,11 @@ substitutions. Two effect scales:
   {i, j} is the next contact statement, so it sums to about one over pairs:
   a mutation that strengthens some contacts lowers every other one through
   renormalization. Subtracting m removes that common shift, and the log
-  ratio puts high- and low-P contacts on one scale.
+  ratio puts high- and low-P contacts on one scale. P' is floored at
+  ``P_FLOOR``: a substitution at a contact's own residues can knock it out,
+  and the fp32 difference then overshoots to P' slightly below zero (down to
+  about -1e-5 on the A4 panel), where an unfloored log would turn the
+  strongest effects into NaNs that the sums drop.
 
 From those effects, per contact:
 
@@ -63,13 +67,14 @@ DISTANCE_LABELS = ["0", "1", "2-3", "4-7", "8-15", "16-31", "32-63", "64+"]
 SCALES = ("raw", "log")
 N_BOOT = 10_000
 SEED = 341
+P_FLOOR = 1e-5
 
 
 def effects(arrays: dict) -> dict[str, np.ndarray]:
     """Per scale, the ``[L residues, contacts]`` effect summed over substitutions."""
     dp = arrays["dp_top"].astype(np.float64)
     p = arrays["p_clean_top"].astype(np.float64)
-    log_ratio = np.log1p(dp / p[None, None, :])
+    log_ratio = np.log(np.maximum(p[None, None, :] + dp, P_FLOOR) / p[None, None, :])
     centered = log_ratio - np.nanmedian(log_ratio, axis=2, keepdims=True)
     return {
         "raw": np.nansum(np.abs(dp), axis=1),

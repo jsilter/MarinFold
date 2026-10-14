@@ -19,6 +19,11 @@ A negative DiD in locality means exposure spreads the Jacobian over the
 chain, which is the signature the plan attributes to recall. CIs bootstrap
 pairs within bin (``N_BOOT``, seeded); "all" pools the bins.
 
+Locality tracks precision across structures, so a locality DiD could come
+from exp199 predicting a different top-L set. ``locality_shared_{scale}``
+recomputes locality per model on only the contacts in both models' top L,
+which holds the contacts fixed and compares how each model computes them.
+
 Outputs ``data/a2_panel_per_structure.csv`` and ``data/a2_panel_did.csv``.
 
     uv run python analyze_a2_panel.py --exp199-dir out/a2_panel/exp199 --exp232-dir out/a2_panel/exp232
@@ -32,30 +37,48 @@ import numpy as np
 import pandas as pd
 
 import harness
-from analyze_a2 import SCALES, protein_rows
+from analyze_a2 import NEIGHBOURHOOD, SCALES, effects, protein_rows
 from marinfold.document_structures.contacts_v1.inference import gt_contact_matrix
 
 DATA = Path(__file__).resolve().parent / "data"
-METRICS = [*(f"locality_{scale}" for scale in SCALES), *(f"structural_{scale}" for scale in SCALES), "precision_at_l"]
+METRICS = [*(f"locality_{scale}" for scale in SCALES), *(f"locality_shared_{scale}" for scale in SCALES),
+           *(f"structural_{scale}" for scale in SCALES), "precision_at_l"]
 N_BOOT = 10_000
 SEED = 341
+
+
+def shared_locality(arrays: dict[str, dict]) -> dict[str, dict[str, float]]:
+    """Per model and scale, mean locality over the contacts in every model's top L."""
+    index = {model: {tuple(pair): k for k, pair in enumerate(a["top_pairs"])} for model, a in arrays.items()}
+    shared = np.array(sorted(set.intersection(*(set(keys) for keys in index.values()))))
+    out = {}
+    for model, a in arrays.items():
+        columns = [index[model][tuple(pair)] for pair in shared]
+        positions = np.arange(a["dp_top"].shape[0])[:, None]
+        near = np.minimum(np.abs(positions - shared[None, :, 0]), np.abs(positions - shared[None, :, 1])) <= NEIGHBOURHOOD
+        out[model] = {}
+        for scale, effect in effects(a).items():
+            effect = effect[:, columns]
+            out[model][f"locality_shared_{scale}"] = np.nanmean((effect * near).sum(axis=0) / effect.sum(axis=0))
+    return out
 
 
 def per_structure(table: pd.DataFrame, directories: dict[str, Path]) -> pd.DataFrame:
     proteins = {p.stem: p for p in harness.load_panel_proteins(DATA / "panel.parquet") if p.stem in set(table["key"])}
     rows = []
-    for model, directory in directories.items():
-        for key in table["key"]:
-            path = directory / "proteins" / f"{key}.npz"
-            if not path.exists():
-                continue
-            protein = proteins[key]
-            gt = gt_contact_matrix(protein.structure.gt_contacts, protein.length, harness.MIN_SEQ_SEPARATION)
-            gt = gt | gt.T
-            arrays = dict(np.load(path))
-            is_true = gt[arrays["top_pairs"][:, 0], arrays["top_pairs"][:, 1]]
-            row, _ = protein_rows(key, arrays, gt, is_true)
-            rows.append({"model": model, **row})
+    for key in table["key"]:
+        paths = {model: directory / "proteins" / f"{key}.npz" for model, directory in directories.items()}
+        if not all(path.exists() for path in paths.values()):
+            continue
+        protein = proteins[key]
+        gt = gt_contact_matrix(protein.structure.gt_contacts, protein.length, harness.MIN_SEQ_SEPARATION)
+        gt = gt | gt.T
+        arrays = {model: dict(np.load(path)) for model, path in paths.items()}
+        shared = shared_locality(arrays)
+        for model, a in arrays.items():
+            is_true = gt[a["top_pairs"][:, 0], a["top_pairs"][:, 1]]
+            row, _ = protein_rows(key, a, gt, is_true)
+            rows.append({"model": model, **row, **shared[model]})
     return table.merge(pd.DataFrame(rows), on="key", how="inner")
 
 
