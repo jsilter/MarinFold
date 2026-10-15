@@ -184,16 +184,16 @@ exactly 20 such pairs, well below its median length of 546), run in fp32.
 Exposure raised precision at L, reproducing A4 on this subset, and raised
 locality instead of lowering it. "Shared contacts" restricts both models to
 contacts in both of their top-L sets, so the increase is a change in how
-exp199 computes the same contacts, not in which contacts it predicts. Per bin, every locality DiD is positive;
-with 20 pairs, only bin 0 excludes zero on its own. In fp32 the structural
-share is 1.4 to 1.9 times its null (0.031 to 0.036 against 0.019 to 0.023),
-and exposure moves it by 0.003.
+exp199 computes the same contacts, not in which contacts it predicts. Per
+bin, every locality DiD is positive; with 20 pairs, only bin 0 excludes zero
+on its own. In fp32 the structural share is 1.4 to 1.9 times its null (0.031
+to 0.036 against 0.019 to 0.023), and exposure moves it by 0.003.
 
 Locality and precision move together. In a check outside the committed
 outputs, their Spearman correlation across the 400 structure-model rows is
 0.53 (log scale), and the 23 pairs whose precision DiD is under 0.02 in
-magnitude have a locality DiD of 0.001. The data do not say whether exposure sharpens
-locality directly or whether locality follows from a more confident
+magnitude have a locality DiD of 0.001. The data do not say whether exposure
+sharpens locality directly or whether locality follows from a more confident
 prediction.
 
 ![A2 panel DiD](plots/a2_panel_did.png)
