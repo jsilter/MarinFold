@@ -1,21 +1,42 @@
 # exp341 Track A: memorization vs coevolution in contacts-v1
 
-Track A of [#341](https://github.com/Open-Athena/MarinFold/issues/341) asks
+Track A of [\#341](https://github.com/Open-Athena/MarinFold/issues/341) asks
 whether the next contacts-v1 model should cap how often each protein family
 is sampled (decision A in [`research_plan.md`](research_plan.md), section 5).
 A cap helps if the model recalls families and individual structures; it
 costs accuracy if the model learns couplings from family statistics.
 
-**Result.** Training on a structure (together with its Foldseek cluster)
-adds 0.04 to 0.085 R-precision in every relative-count bin, including
-structures that keep 64 or more relatives in training. That is a memorized
-component, small next to the 0.56 R-precision exp232 reaches on the same
-structures without seeing them. Two of the plan's routes to a decision did
-not deliver. A3 gives no cap value: its accuracy curve is flat from zero
-relatives, and its control set scores below the structures it was meant to
-bound. A2's locality score cannot separate recall from coupling in this
-model: exposure made each contact depend more on the residues at the
-contact, not less, which is the direction the plan assigned to coupling.
+**Recommendation: no change to family weighting for the next model.** Keep
+the corpus's current per-family sampling, and record decision A as
+inconclusive. The plan fixed a rule for each outcome before any result
+existed (section 1.2), and the results match neither row:
+
+| Plan's condition | "Cap per cluster" row | "Keep redundancy" row | Observed |
+|---|---|---|---|
+| A4: exposure advantage with many relatives left | persists | | Persists: +0.040 R-precision at 64+ relatives |
+| A3: accuracy vs surviving relatives | saturates at a small count | keeps rising | Flat from 0 relatives; control failed; breakpoint CI 2 to 435 |
+| A2: contact dependence | non-local | local | Local, and exposure makes it more local |
+| A1: coupling map tracks MSA depth | | yes | Not run |
+
+The plan reports a result between the rows as inconclusive, and a cap needs
+a value from A3 that the data do not give. The evidence behind this:
+
+- **A4.** Training on a structure (together with its Foldseek cluster) adds
+  0.04 to 0.085 R-precision in every relative-count bin, including
+  structures that keep 64 or more relatives in training. That is a memorized
+  component, small next to the 0.56 R-precision exp232 reaches on the same
+  structures without seeing them.
+- **A3.** Its accuracy curve is flat from zero relatives, and its control
+  set scores below the structures it was meant to bound, so it supplies no
+  cap value.
+- **A2.** Locality cannot separate recall from coupling in this model:
+  exposure made each contact depend more on the residues at the contact, not
+  less, which is the direction the plan assigned to coupling.
+
+Two things would reopen the decision: an A3 control matched on whatever
+makes removed structures easier (no new GPU training needed), or a
+per-cluster cap ablation in training. Further A2 work (the fp32 rerun of the
+eval set) would not, since locality cannot decide A.
 
 ## What ran
 
@@ -28,7 +49,7 @@ contact, not less, which is the direction the plan assigned to coupling.
 | A1 | | | sequence-section Jacobian | Not run |
 
 Models: `contacts-v1-exp199-cooldown-1.5B` (step 290400) trained on the
-structures #225 later removed; `contacts-v1-exp232-m2-p06-train-1.5B` (step
+structures \#225 later removed; `contacts-v1-exp232-m2-p06-train-1.5B` (step
 363000) never saw them; `contacts-v1-exp277-m2-p06-full-epoch-1.5B` is the
 registry default. All runs used one L40S (g6e.xlarge, us-east-2). The panel
 readouts took 1.39 h per model, A2 on the eval set 18.2 GPU-h, and A2 on the
@@ -36,7 +57,7 @@ panel 20.9 GPU-h.
 
 ## The held-out panel
 
-#225 removed 166,679 AFDB structures (4.04% of the corpus) because they
+\#225 removed 166,679 AFDB structures (4.04% of the corpus) because they
 resembled eval proteins. From 300 of the 2,067 AFDB shards we took 23,745
 removed and 12,000 kept candidates, counted each one's relatives in exp232's
 69.5M training sequences (MMseqs2, identity >= 0.30, coverage >= 0.50), and
@@ -63,10 +84,10 @@ bootstrap pairs within bin (10,000 resamples).
 | 64+ | 0.061 | 0.021 | 0.040 [0.022, 0.058] |
 
 Surviving relatives do not substitute for exposure: the effect at 64+ is
-smaller but still excludes zero. #225 purged whole clusters, so this
+smaller but still excludes zero. \#225 purged whole clusters, so this
 measures exposure to a structure and its removed relatives, about 16 AFDB
 epochs of them. For scale, exp199's promotion over exp166 was +0.026, and
-#245 could not resolve the same model comparison on eval proteins (+0.024
+\#245 could not resolve the same model comparison on eval proteins (+0.024
 [−0.022, +0.073]).
 
 ![A3 and A4](plots/panel_a3_a4.png)
@@ -162,16 +183,16 @@ exactly 20 such pairs, well below its median length of 546), run in fp32.
 
 Exposure raised precision at L, reproducing A4 on this subset, and raised
 locality instead of lowering it. "Shared contacts" restricts both models to
-contacts in both of their top-L sets, so the increase is a change in how exp199 computes the same contacts,
-not in which contacts it predicts. Per bin, every locality DiD is positive;
+contacts in both of their top-L sets, so the increase is a change in how
+exp199 computes the same contacts, not in which contacts it predicts. Per bin, every locality DiD is positive;
 with 20 pairs, only bin 0 excludes zero on its own. In fp32 the structural
 share is 1.4 to 1.9 times its null (0.031 to 0.036 against 0.019 to 0.023),
 and exposure moves it by 0.003.
 
 Locality and precision move together. In a check outside the committed
 outputs, their Spearman correlation across the 400 structure-model rows is
-0.53 (log scale), and the 23 pairs whose precision DiD is under 0.02 in magnitude have a
-locality DiD of 0.001. The data do not say whether exposure sharpens
+0.53 (log scale), and the 23 pairs whose precision DiD is under 0.02 in
+magnitude have a locality DiD of 0.001. The data do not say whether exposure sharpens
 locality directly or whether locality follows from a more confident
 prediction.
 
