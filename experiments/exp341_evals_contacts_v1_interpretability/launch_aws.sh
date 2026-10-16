@@ -14,6 +14,11 @@
 #              failed run, and the driver skips proteins it already wrote.
 #              A2_ARGS adds driver flags (e.g. "--dtype float32 --keys ...");
 #              TAG adds a label to the S3 prefix.
+#   b1         GPU. B1 layer ablation (b1_layer_ablation.py) on exp277 over
+#              eval-val and eval-denovo: clean plus 48 mean-ablated sublayers.
+#              out/ is synced to S3 every 10 minutes; RESUME_FROM works as for
+#              a2 (finished conditions are skipped). B1_ARGS adds driver flags
+#              (e.g. "--seed-offset 4" for a repeat run).
 #   relatives  CPU. Panel stage 2 (relative_counts.py): decode exp232's
 #              training sequences from the HF bucket and MMseqs2-search the
 #              stage 1 candidates (CANDIDATES=path/to/candidates.parquet).
@@ -29,15 +34,16 @@
 # Account facts (no key pairs; the instance profile name is not discoverable
 # with this user's IAM permissions) are from the exp91/exp145 EC2 workers.
 #
-# Usage (CloudShell STS credentials expire after ~15 minutes; REGION and
-# SUBNET must name the same region):
-#   set -a; source experiments/exp341_evals_contacts_v1_interpretability/aws_keys.env; set +a
+# Usage (credentials come from the `marinfold` profile, which refreshes the
+# 15-minute keys from an `aws login --profile marinfold-login` session good for
+# up to 12 hours; REGION and SUBNET must name the same region):
+#   export AWS_PROFILE=marinfold
 #   experiments/exp341_evals_contacts_v1_interpretability/launch_aws.sh harness
 #   INSTANCE_TYPE=g6e.xlarge experiments/exp341_evals_contacts_v1_interpretability/launch_aws.sh harness
 #   CANDIDATES=/path/candidates.parquet experiments/exp341_evals_contacts_v1_interpretability/launch_aws.sh relatives
 set -euo pipefail
 
-JOB=${1:?usage: launch_aws.sh harness|panel|a2|relatives}
+JOB=${1:?usage: launch_aws.sh harness|panel|a2|b1|relatives}
 # The bucket stays in us-west-2; harness inputs and outputs are tens of MB.
 BUCKET=marinfold-exp91-usw2
 BUCKET_REGION=us-west-2
@@ -79,6 +85,15 @@ case "$JOB" in
         : "${SHARD:?set SHARD (0-based) for the a2 job}"
         : "${N_SHARDS:?set N_SHARDS for the a2 job}"
         ;;
+    b1)
+        # 49 readout passes at ~121 s each (check 5's 4-seed eval pass), ~1.7 L40S-hours.
+        INSTANCE_TYPE=${INSTANCE_TYPE:-g6e.xlarge}  # 1x L40S 48GB
+        REGION=${REGION:-us-east-2}
+        SUBNET=${SUBNET:-subnet-03f9b7abd4284ad5e}
+        MAX_MINUTES=${MAX_MINUTES:-240}
+        DISK_GB=150
+        AMI_PARAMETER=/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id
+        ;;
     relatives)
         # CPU, next to the bucket. 256 GB RAM keeps the MMseqs2 prefilter from
         # splitting heavily; the disk holds ~40 GB of FASTA, the target DB and
@@ -92,7 +107,7 @@ case "$JOB" in
         : "${CANDIDATES:?set CANDIDATES to the stage 1 candidates.parquet}"
         ;;
     *)
-        echo "unknown job $JOB (harness|panel|a2|relatives)" >&2
+        echo "unknown job $JOB (harness|panel|a2|b1|relatives)" >&2
         exit 1
         ;;
 esac
@@ -145,6 +160,18 @@ rc_b=0
 STEPS
 )
         ;;
+    b1)
+        steps=$(cat <<'STEPS'
+nvidia-smi
+mkdir -p out
+[ -n "$RESUME_FROM" ] && aws s3 sync --quiet $RESUME_FROM/out out
+(while sleep 600; do aws s3 sync --quiet out $S3/out; done) &
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python b1_layer_ablation.py --device cuda --runner-tag aws --output-dir out/b1 $B1_ARGS
+rc_a=$?
+rc_b=0
+STEPS
+)
+        ;;
     relatives)
         aws s3 cp --region "$BUCKET_REGION" "$CANDIDATES" "$s3/candidates.parquet"
         steps=$(cat <<'STEPS'
@@ -168,6 +195,7 @@ SHARD=${SHARD:-}
 N_SHARDS=${N_SHARDS:-}
 RESUME_FROM=${RESUME_FROM:-}
 A2_ARGS="${A2_ARGS:-}"
+B1_ARGS="${B1_ARGS:-}"
 export HOME=/root
 export AWS_DEFAULT_REGION=$BUCKET_REGION
 command -v aws >/dev/null || snap install aws-cli --classic

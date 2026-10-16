@@ -63,3 +63,29 @@ def test_eval_proteins_load_with_in_range_ground_truth():
     for p in proteins:
         assert p.resolved.min() >= 0 and p.resolved.max() < p.length
         assert all(0 <= c.seq_i < c.seq_j < p.length for c in p.structure.gt_contacts)
+
+
+def test_sublayer_means_average_every_processed_position_without_changing_the_readout(backend, protein):
+    clean = harness.pcontact(backend, protein, seeds=1)
+    outputs: list[torch.Tensor] = []
+    handle = harness.decoder_layers(backend.model)[1].mlp.register_forward_hook(
+        lambda _m, _i, out: outputs.append(out.detach().reshape(-1, out.shape[-1]))
+    )
+    try:
+        with harness.sublayer_means(backend.model) as (means, counts):
+            hooked = harness.pcontact(backend, protein, seeds=1)
+    finally:
+        handle.remove()
+    np.testing.assert_array_equal(hooked, clean)
+    assert set(means) == {(k, site) for k in range(2) for site in ("attn", "mlp")}
+    expected = torch.cat(outputs).double().mean(dim=0).float()
+    torch.testing.assert_close(means[(1, "mlp")], expected)
+    assert counts[(1, "mlp")] == sum(len(o) for o in outputs)
+
+
+def test_per_seed_readout_averages_to_the_production_readout(backend, protein):
+    per_seed = harness.pcontact_per_seed(backend, protein, seeds=3)
+    assert per_seed.shape == (3, 20, 20)
+    np.testing.assert_array_equal(per_seed.sum(axis=0) / 3, harness.pcontact(backend, protein, seeds=3))
+    shifted = harness.pcontact_per_seed(backend, protein, seeds=2, seed_offset=1)
+    np.testing.assert_array_equal(shifted, per_seed[1:])

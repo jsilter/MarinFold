@@ -19,8 +19,9 @@ need around it:
   theta 10000 and no llama3 scaling.
 - **Hooks.** Plain ``torch`` forward hooks on the Qwen3 decoder layers.
   :func:`capture_residuals` records the residual stream after the embedding
-  and after every layer; :func:`mean_ablation` replaces chosen attention or
-  MLP outputs with a fixed mean vector. Both act on the backend's own model,
+  and after every layer; :func:`sublayer_means` accumulates the mean
+  attention and MLP output of every layer; :func:`mean_ablation` replaces
+  chosen attention or MLP outputs with a fixed mean vector. Both act on the backend's own model,
   so a hooked readout is the production readout with hooks attached.
 - **Eval proteins.** :func:`load_eval_proteins` reads exp245's FoldBench
   monomers (eval-val, eval-denovo) from the committed exp245 data directory.
@@ -61,8 +62,11 @@ from marinfold import Backend, load_backend
 from marinfold.document_structures.contacts_v1.inference import (
     ContactStructure,
     InferenceConfig,
+    fwd_matrix,
     gt_contact_matrix,
     pairwise_score_matrix,
+    pcontact_from_fwd,
+    prefix_and_positions,
 )
 from marinfold.document_structures.contacts_v1.parse import RawContact, residues_from_sequence
 from marinfold.registry import resolve_model
@@ -270,6 +274,45 @@ def capture_residuals(model: torch.nn.Module) -> Iterator[list[list[torch.Tensor
 
 
 @contextlib.contextmanager
+def sublayer_means(
+    model: torch.nn.Module,
+) -> Iterator[tuple[dict[tuple[int, Site], torch.Tensor], dict[tuple[int, Site], int]]]:
+    """Accumulate the mean output of every attention and MLP sublayer while active.
+
+    Yields ``(means, counts)``, filled on exit: ``(layer, site)`` to a float32
+    ``[hidden]`` mean, and to the number of positions averaged, over every
+    position of every forward call made inside the block (for the readout, the prefix passes and all tail chunks). Sums
+    are kept in float64 on the model's device. The hooks only read; outputs
+    are unchanged.
+    """
+    layers = decoder_layers(model)
+    sums: dict[tuple[int, Site], torch.Tensor] = {}
+    counts: dict[tuple[int, Site], int] = {}
+
+    def accumulator(key: tuple[int, Site]):
+        def hook(_module, _inputs, output):
+            hidden = output[0] if isinstance(output, tuple) else output
+            flat = hidden.detach().reshape(-1, hidden.shape[-1]).to(torch.float64)
+            sums[key] = flat.sum(dim=0) + sums[key] if key in sums else flat.sum(dim=0)
+            counts[key] = counts.get(key, 0) + flat.shape[0]
+
+        return hook
+
+    handles = []
+    for k, layer in enumerate(layers):
+        handles.append(layer.self_attn.register_forward_hook(accumulator((k, "attn"))))
+        handles.append(layer.mlp.register_forward_hook(accumulator((k, "mlp"))))
+    means: dict[tuple[int, Site], torch.Tensor] = {}
+    try:
+        yield means, counts
+    finally:
+        for handle in handles:
+            handle.remove()
+    for key, total in sums.items():
+        means[key] = (total / counts[key]).to(torch.float32)
+
+
+@contextlib.contextmanager
 def mean_ablation(model: torch.nn.Module, means: Mapping[tuple[int, Site], torch.Tensor]) -> Iterator[None]:
     """Replace selected attention / MLP outputs with fixed mean vectors.
 
@@ -305,6 +348,28 @@ def pcontact(backend: Backend, protein: EvalProtein, *, seeds: int = DEFAULT_SEE
     if built is None:
         raise ValueError(f"{protein.stem}: contacts-v1 could not serialize this chain")
     return built[0]
+
+
+def pcontact_per_seed(
+    backend: Backend, protein: EvalProtein, *, seeds: int = DEFAULT_SEEDS, seed_offset: int = 0
+) -> np.ndarray:
+    """``[seeds, L, L]`` P(contact), one matrix per document seed.
+
+    Seed ``k`` is the realization ``pairwise_score_matrix`` draws with salt
+    ``f"{entry_id}#cv1ens{k}"``, for ``k`` in ``seed_offset .. seed_offset +
+    seeds - 1``. With ``seed_offset=0`` and ``seeds >= 2``, summing the
+    matrices in order and dividing by ``seeds`` reproduces :func:`pcontact`
+    exactly; a nonzero offset draws realizations the default readout never
+    uses, so repeated runs add independent samples.
+    """
+    matrices = []
+    for k in range(seed_offset, seed_offset + seeds):
+        built = prefix_and_positions(protein.structure, entry_id=f"{protein.stem}#cv1ens{k}")
+        if built is None:
+            raise ValueError(f"{protein.stem}: contacts-v1 could not serialize this chain")
+        prefix, seq_positions, _ = built
+        matrices.append(pcontact_from_fwd(fwd_matrix(backend, prefix, seq_positions)))
+    return np.stack(matrices)
 
 
 def r_precision(
