@@ -163,7 +163,7 @@ def main() -> int:
             clean = run_condition("clean", proteins, backend, args, static)
         counts = np.array([[counts[(k, site)] for site in SITES] for k in range(n_layers)])
         stacked = torch.stack([torch.stack([means[(k, site)] for site in SITES]) for k in range(n_layers)])
-        np.savez(means_path, means=stacked.numpy(), counts=counts)
+        np.savez(means_path, means=stacked.cpu().numpy(), counts=counts)
         print(f"clean {time.perf_counter() - start:.0f}s rp_all {clean[clean.seed == 'mean'].rp_all.mean():.4f}", flush=True)
 
     for layer in layers:
