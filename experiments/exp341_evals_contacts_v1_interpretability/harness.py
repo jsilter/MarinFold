@@ -274,6 +274,41 @@ def capture_residuals(model: torch.nn.Module) -> Iterator[list[list[torch.Tensor
 
 
 @contextlib.contextmanager
+def query_residuals(model: torch.nn.Module) -> Iterator[list[list[torch.Tensor]]]:
+    """Record the residual at each tail's last position, at every layer boundary.
+
+    The readout forwards the prefix once per ``next_token_probs`` call and
+    then the tails (``<contact>`` for lp1, ``<contact> <p_i>`` for lp2) in
+    chunks; the next-token distribution is read at a tail's last position.
+    This keeps exactly those rows: calls whose sequence is at most 2 tokens
+    long are tails (a prefix is always longer), and from each the last
+    position is kept, on device. Index 0 is the embedding output, index
+    ``k`` the output of decoder layer ``k - 1`` (pre final norm). Per
+    boundary the entries are ``[batch, hidden]`` in call order, so after one
+    ``fwd_matrix`` they concatenate to ``L + 1`` rows: the lp1 query, then
+    the lp2 query for each residue in sequence order.
+    """
+    captured: list[list[torch.Tensor]] = [[] for _ in range(len(decoder_layers(model)) + 1)]
+
+    def recorder(index: int):
+        def hook(_module, _inputs, output):
+            hidden = output[0] if isinstance(output, tuple) else output
+            if hidden.shape[1] <= 2:
+                captured[index].append(hidden[:, -1, :].detach())
+
+        return hook
+
+    handles = [model.model.embed_tokens.register_forward_hook(recorder(0))]
+    for k, layer in enumerate(decoder_layers(model)):
+        handles.append(layer.register_forward_hook(recorder(k + 1)))
+    try:
+        yield captured
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
+@contextlib.contextmanager
 def sublayer_means(
     model: torch.nn.Module,
 ) -> Iterator[tuple[dict[tuple[int, Site], torch.Tensor], dict[tuple[int, Site], int]]]:

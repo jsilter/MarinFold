@@ -19,6 +19,11 @@
 #              out/ is synced to S3 every 10 minutes; RESUME_FROM works as for
 #              a2 (finished conditions are skipped). B1_ARGS adds driver flags
 #              (e.g. "--seed-offset 4" for a repeat run).
+#   lens       GPU. B1 tuned lens (b1_tuned_lens.py) on exp277: fit the maps
+#              on the 200 legacy-554 proteins, then decode every layer
+#              boundary over eval-val and eval-denovo. Syncs and resumes as
+#              b1; LENS_ARGS adds driver flags (e.g. "--limit 2 --fit-limit 5
+#              --seeds 2" for a smoke test).
 #   relatives  CPU. Panel stage 2 (relative_counts.py): decode exp232's
 #              training sequences from the HF bucket and MMseqs2-search the
 #              stage 1 candidates (CANDIDATES=path/to/candidates.parquet).
@@ -43,7 +48,7 @@
 #   CANDIDATES=/path/candidates.parquet experiments/exp341_evals_contacts_v1_interpretability/launch_aws.sh relatives
 set -euo pipefail
 
-JOB=${1:?usage: launch_aws.sh harness|panel|a2|b1|relatives}
+JOB=${1:?usage: launch_aws.sh harness|panel|a2|b1|lens|relatives}
 # The bucket stays in us-west-2; harness inputs and outputs are tens of MB.
 BUCKET=marinfold-exp91-usw2
 BUCKET_REGION=us-west-2
@@ -94,6 +99,16 @@ case "$JOB" in
         DISK_GB=150
         AMI_PARAMETER=/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id
         ;;
+    lens)
+        # A fit pass over 200 proteins x 4 seeds and one eval pass, each
+        # about one 4-seed readout (~320 s on an L4) plus the lens algebra.
+        INSTANCE_TYPE=${INSTANCE_TYPE:-g6.xlarge}  # 1x L4 24GB
+        REGION=${REGION:-us-east-2}
+        SUBNET=${SUBNET:-subnet-03f9b7abd4284ad5e}
+        MAX_MINUTES=${MAX_MINUTES:-180}
+        DISK_GB=150
+        AMI_PARAMETER=/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id
+        ;;
     relatives)
         # CPU, next to the bucket. 256 GB RAM keeps the MMseqs2 prefilter from
         # splitting heavily; the disk holds ~40 GB of FASTA, the target DB and
@@ -107,7 +122,7 @@ case "$JOB" in
         : "${CANDIDATES:?set CANDIDATES to the stage 1 candidates.parquet}"
         ;;
     *)
-        echo "unknown job $JOB (harness|panel|a2|b1|relatives)" >&2
+        echo "unknown job $JOB (harness|panel|a2|b1|lens|relatives)" >&2
         exit 1
         ;;
 esac
@@ -172,6 +187,18 @@ rc_b=0
 STEPS
 )
         ;;
+    lens)
+        steps=$(cat <<'STEPS'
+nvidia-smi
+mkdir -p out
+[ -n "$RESUME_FROM" ] && aws s3 sync --quiet $RESUME_FROM/out out
+(while sleep 600; do aws s3 sync --quiet out $S3/out; done) &
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python b1_tuned_lens.py --device cuda --runner-tag aws --output-dir out/lens $LENS_ARGS
+rc_a=$?
+rc_b=0
+STEPS
+)
+        ;;
     relatives)
         aws s3 cp --region "$BUCKET_REGION" "$CANDIDATES" "$s3/candidates.parquet"
         steps=$(cat <<'STEPS'
@@ -196,6 +223,7 @@ N_SHARDS=${N_SHARDS:-}
 RESUME_FROM=${RESUME_FROM:-}
 A2_ARGS="${A2_ARGS:-}"
 B1_ARGS="${B1_ARGS:-}"
+LENS_ARGS="${LENS_ARGS:-}"
 export HOME=/root
 export AWS_DEFAULT_REGION=$BUCKET_REGION
 command -v aws >/dev/null || snap install aws-cli --classic

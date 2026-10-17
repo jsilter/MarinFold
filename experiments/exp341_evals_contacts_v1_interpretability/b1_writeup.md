@@ -118,8 +118,8 @@ stretch between them.
 exception is layer 22 attention. The median CI half-width is 0.010 when
 bootstrapping proteins and 0.014 when also resampling the 4 document seeds
 within each protein. The second CI is centred on the mean per-seed change,
-which differs from the seed-averaged change by up to 0.07 (layer 22 MLP:
--0.301 per seed, -0.372 averaged), because R-precision of an averaged
+which differs from the seed-averaged change by up to 0.09 (layer 15 MLP:
+-0.182 per seed, -0.089 averaged), because R-precision of an averaged
 matrix is not the average of per-seed R-precisions. Effects this large do
 not need repeat runs; a run with `--seed-offset 4` would tighten the
 seed-level CI if small effects become the question.
