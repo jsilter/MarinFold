@@ -40,9 +40,16 @@ The script records raw data and applies no threshold. Outputs under
   last; it marks the protein done for resume.
 - ``scores/<stem>.csv``: R-precision per lens, boundary and seed (plus seed
   ``mean``, the seed-averaged matrix) in the four B1 bands.
-- ``timings/<stem>.csv``: the AGENTS.md predictor-timing rows, plus
-  ``final_max_abs_dp``, the largest difference between the boundary-24
-  logit lens and the production readout.
+- ``timings/<stem>.csv``: the AGENTS.md predictor-timing rows, plus the
+  boundary-24 check: ``final_max_abs_dp``, the largest difference between
+  the boundary-24 decode and the production readout, and both seed-averaged
+  all-pairs R-precisions (``final_rp``, ``production_rp``). The run stops
+  if those differ by more than ``FINAL_RP_TOLERANCE``: the production
+  readout's bf16 logits round differently from the float32 decode, so the
+  matrices are not equal entrywise and a small protein's R-precision can
+  move by one contact (1/17 for a 30-residue chain). The tolerance catches
+  decoding bugs (wrong rows or token ids give near-random R-precision);
+  agreement over all proteins is checked in the analysis.
 
     uv run python b1_tuned_lens.py --device cuda --output-dir out/lens
     uv run python b1_tuned_lens.py --device cpu --limit 2 --fit-limit 5 --seeds 2 --output-dir out/lens_smoke
@@ -73,10 +80,11 @@ from b1_layer_ablation import BANDS
 
 DATA = Path(__file__).resolve().parent / "data"
 FIT_SET = DATA / "a2_legacy_gt.jsonl.gz"
-RIDGE_GRID = (1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1)
+RIDGE_GRID = (1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0)
 HOLDOUT = 0.2
 SEED = 341
 LENSES = ("logit", "tuned")
+FINAL_RP_TOLERANCE = 0.2
 
 
 def rms_normalize(hidden: torch.Tensor, eps: float) -> torch.Tensor:
@@ -107,10 +115,16 @@ def query_pass(backend, protein: harness.EvalProtein, seed: int) -> tuple[list[t
 
 
 def decode(model, residual: torch.Tensor, pos_ids: torch.Tensor) -> np.ndarray:
-    """Final norm, unembedding and softmax over the full vocabulary; probabilities of ``pos_ids``."""
+    """Final norm, unembedding and softmax over the full vocabulary, in float32; probabilities of ``pos_ids``.
+
+    The model's own readout rounds its logits to the model dtype; in bf16,
+    logits near 20 are spaced 0.125 apart, which moves probabilities by up
+    to ~12%. Decoding in float32 keeps that rounding out of the lens.
+    """
     with torch.inference_mode():
-        logits = model.lm_head(model.model.norm(residual.to(model.dtype)))
-        probs = torch.softmax(logits.float(), dim=-1).index_select(-1, pos_ids)
+        normed = model.model.norm(residual.float())
+        logits = normed @ model.lm_head.weight.float().T
+        probs = torch.softmax(logits, dim=-1).index_select(-1, pos_ids)
     return probs.cpu().numpy().astype(np.float64)
 
 
@@ -296,9 +310,11 @@ def main() -> int:
         pcontact = np.stack(lens, axis=2)  # [2, boundaries, seeds, L, L]
         production = np.stack(production)
         final_max_abs_dp = float(np.abs(pcontact[0, -1] - production).max())
-        if final_max_abs_dp > 1e-2:
-            raise RuntimeError(f"{protein.stem}: boundary-{n_boundaries} logit lens differs from the readout by "
-                               f"{final_max_abs_dp:.3g}")
+        final_rp = harness.r_precision(pcontact[0, -1].sum(axis=0) / args.seeds, protein)
+        production_rp = harness.r_precision(production.sum(axis=0) / args.seeds, protein)
+        if abs(final_rp - production_rp) > FINAL_RP_TOLERANCE:
+            raise RuntimeError(f"{protein.stem}: boundary-{n_boundaries} decode R-precision {final_rp:.3f}, "
+                               f"production {production_rp:.3f}")
         elapsed = time.perf_counter() - start
         upper = np.triu_indices(protein.length, k=1)
         pd.DataFrame(score_rows(protein, pcontact)).to_csv(
@@ -307,12 +323,12 @@ def main() -> int:
             "stem": protein.stem, "n_residues": protein.length,
             "n_pairs": protein.length * (protein.length - 1) // 2, "mode": f"b1-lens-{args.seeds}seed",
             "elapsed_seconds": round(elapsed, 3), "total_seconds": round(time.perf_counter() - start, 3),
-            "final_max_abs_dp": final_max_abs_dp,
+            "final_max_abs_dp": final_max_abs_dp, "final_rp": final_rp, "production_rp": production_rp,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), **static,
         }]).to_csv(args.output_dir / "timings" / f"{protein.stem}.csv", index=False)
         np.savez_compressed(done, pcontact=pcontact[..., upper[0], upper[1]].astype(np.float32),
                             production=production[:, upper[0], upper[1]].astype(np.float32))
-        print(f"{protein.stem} L={protein.length} {elapsed:.0f}s final |dP| {final_max_abs_dp:.2g}", flush=True)
+        print(f"{protein.stem} L={protein.length} {elapsed:.0f}s final rp {final_rp:.3f} production {production_rp:.3f}", flush=True)
     return 0
 
 
