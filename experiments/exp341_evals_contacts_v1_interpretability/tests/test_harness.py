@@ -89,3 +89,15 @@ def test_per_seed_readout_averages_to_the_production_readout(backend, protein):
     np.testing.assert_array_equal(per_seed.sum(axis=0) / 3, harness.pcontact(backend, protein, seeds=3))
     shifted = harness.pcontact_per_seed(backend, protein, seeds=2, seed_offset=1)
     np.testing.assert_array_equal(shifted, per_seed[1:])
+
+
+def test_protein_sets_are_held_out_and_disjoint():
+    eval_chains = {harness.base_stem(p.stem) for p in harness.load_protein_set("eval")}
+    extra = harness.load_protein_set("legacy-extra")
+    assert len(extra) == 246
+    assert not eval_chains & {harness.base_stem(p.stem) for p in extra}
+    panel = harness.load_protein_set("panel-long", max_length=1000)
+    assert all(p.eval_set == "panel-removed" and harness.PANEL_LONG_MIN_LENGTH < p.length <= 1000 for p in panel)
+    sample = harness.load_protein_set("panel-long", max_length=1000, sample=150)
+    assert len(sample) == 150 and {p.stem for p in sample} <= {p.stem for p in panel}
+    assert [p.stem for p in sample] == [p.stem for p in harness.load_protein_set("panel-long", max_length=1000, sample=150)]

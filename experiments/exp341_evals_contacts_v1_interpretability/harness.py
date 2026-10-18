@@ -75,7 +75,11 @@ from transformers import AutoConfig, AutoModelForCausalLM
 EXP245_DATA = (
     Path(__file__).resolve().parent.parent / "exp245_evals_foldbench_held_out_monomers" / "data"
 )
+DATA = Path(__file__).resolve().parent / "data"
 ALLOWED_EVAL_SETS = ("eval-val", "eval-denovo")
+PROTEIN_SETS = ("eval", "legacy-extra", "panel-long")
+# panel-long: held-out panel structures longer than this, for B1's length question.
+PANEL_LONG_MIN_LENGTH = 300
 # Every readout in this experiment averages over this many document seeds
 # (plan section 4.4); the salts are pairwise_score_matrix's
 # f"{entry_id}#cv1ens{k}", so each protein's shuffle and residue offset are
@@ -184,6 +188,41 @@ def load_panel_proteins(path: Path) -> list[EvalProtein]:
         proteins.append(
             EvalProtein(eval_set=f"panel-{row.set}", structure=structure, resolved=np.arange(row.seq_len))
         )
+    return proteins
+
+
+def base_stem(stem: str) -> str:
+    """The PDB chain of a stem: legacy stems are ``<dataset>__<chain>``, eval stems are the chain."""
+    return stem.split("__")[-1]
+
+
+def load_protein_set(
+    name: str, *, max_length: int | None = None, sample: int | None = None, seed: int = 341
+) -> list[EvalProtein]:
+    """One of :data:`PROTEIN_SETS`.
+
+    - ``eval``: eval-val and eval-denovo (116 proteins).
+    - ``legacy-extra``: ``b1_select_extra.py``'s 246 legacy-554 proteins.
+    - ``panel-long``: the A4 panel's removed structures (never in exp277's
+      training data) longer than :data:`PANEL_LONG_MIN_LENGTH` residues.
+
+    ``max_length`` drops longer proteins; ``sample`` keeps a seeded random
+    subset of that size, in the set's original order.
+    """
+    if name == "eval":
+        proteins = load_eval_proteins()
+    elif name == "legacy-extra":
+        proteins = load_legacy_proteins(DATA / "b1_extra_gt.jsonl.gz")
+    elif name == "panel-long":
+        proteins = [p for p in load_panel_proteins(DATA / "panel.parquet")
+                    if p.eval_set == "panel-removed" and p.length > PANEL_LONG_MIN_LENGTH]
+    else:
+        raise ValueError(f"unknown protein set {name!r}; choose from {PROTEIN_SETS}")
+    if max_length is not None:
+        proteins = [p for p in proteins if p.length <= max_length]
+    if sample is not None and sample < len(proteins):
+        keep = np.sort(np.random.default_rng(seed).choice(len(proteins), size=sample, replace=False))
+        proteins = [proteins[k] for k in keep]
     return proteins
 
 

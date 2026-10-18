@@ -23,7 +23,8 @@
 #              on the 200 legacy-554 proteins, then decode every layer
 #              boundary over eval-val and eval-denovo. Syncs and resumes as
 #              b1; LENS_ARGS adds driver flags (e.g. "--limit 2 --fit-limit 5
-#              --seeds 2" for a smoke test).
+#              --seeds 2" for a smoke test). LENS_FROM=s3://.../lens.npz
+#              reuses an earlier run's fitted maps instead of fitting.
 #   relatives  CPU. Panel stage 2 (relative_counts.py): decode exp232's
 #              training sequences from the HF bucket and MMseqs2-search the
 #              stage 1 candidates (CANDIDATES=path/to/candidates.parquet).
@@ -190,8 +191,9 @@ STEPS
     lens)
         steps=$(cat <<'STEPS'
 nvidia-smi
-mkdir -p out
+mkdir -p out/lens
 [ -n "$RESUME_FROM" ] && aws s3 sync --quiet $RESUME_FROM/out out
+[ -n "$LENS_FROM" ] && aws s3 cp --quiet $LENS_FROM out/lens/lens.npz
 (while sleep 600; do aws s3 sync --quiet out $S3/out; done) &
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True uv run python b1_tuned_lens.py --device cuda --runner-tag aws --output-dir out/lens $LENS_ARGS
 rc_a=$?
@@ -224,6 +226,7 @@ RESUME_FROM=${RESUME_FROM:-}
 A2_ARGS="${A2_ARGS:-}"
 B1_ARGS="${B1_ARGS:-}"
 LENS_ARGS="${LENS_ARGS:-}"
+LENS_FROM=${LENS_FROM:-}
 export HOME=/root
 export AWS_DEFAULT_REGION=$BUCKET_REGION
 command -v aws >/dev/null || snap install aws-cli --classic

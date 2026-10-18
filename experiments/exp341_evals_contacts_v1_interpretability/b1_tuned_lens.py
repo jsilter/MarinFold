@@ -20,12 +20,15 @@ every layer boundary (0 = embeddings, k = output of decoder layer k - 1, 24
 Each lens gives an lp1 and lp2 at every boundary, hence a P(contact) matrix
 and an R-precision per boundary, scored exactly as the production readout.
 
-The maps are fitted on the 200 legacy-554 proteins in
-``data/a2_legacy_gt.jsonl.gz`` (no stem shared with the eval sets), 4
-document seeds each, and evaluated on eval-val and eval-denovo. 20% of the
-fit proteins are held out to pick each boundary's ridge strength from
-``RIDGE_GRID`` (times the mean diagonal of XᵀX) by held-out MSE; the maps
-are then refitted on all 200.
+The maps are fitted on the legacy-554 proteins in
+``data/a2_legacy_gt.jsonl.gz``, 4 document seeds each, minus any that are
+the same PDB chain as an exp245 eval protein (6 ``denovo_pdb`` chains are
+eval-denovo proteins), and evaluated on ``--protein-sets`` (see
+``harness.load_protein_set``). 20% of the fit proteins are held out to pick
+each boundary's ridge strength from ``RIDGE_GRID`` (times the mean diagonal
+of XᵀX) by held-out MSE; the maps are then refitted on all of them. A run
+finding ``lens.npz`` in ``--output-dir`` uses it instead of fitting, so
+shards over a large protein set share one fit.
 
 The script records raw data and applies no threshold. Outputs under
 ``--output-dir``:
@@ -51,7 +54,9 @@ The script records raw data and applies no threshold. Outputs under
   decoding bugs (wrong rows or token ids give near-random R-precision);
   agreement over all proteins is checked in the analysis.
 
-    uv run python b1_tuned_lens.py --device cuda --output-dir out/lens
+    uv run python b1_tuned_lens.py --device cuda --protein-sets eval legacy-extra --output-dir out/lens
+    uv run python b1_tuned_lens.py --device cuda --protein-sets panel-long --max-length 1000 \
+        --shard 0 --n-shards 3 --output-dir out/lens_panel   # with lens.npz copied in
     uv run python b1_tuned_lens.py --device cpu --limit 2 --fit-limit 5 --seeds 2 --output-dir out/lens_smoke
 """
 
@@ -250,6 +255,10 @@ def main() -> int:
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--seeds", type=int, default=harness.DEFAULT_SEEDS)
     parser.add_argument("--tail-batch-size", type=int, default=64)
+    parser.add_argument("--protein-sets", nargs="+", choices=harness.PROTEIN_SETS, default=["eval"])
+    parser.add_argument("--max-length", type=int, default=None, help="drop proteins longer than this")
+    parser.add_argument("--shard", type=int, default=0, help="evaluate proteins shard::n-shards")
+    parser.add_argument("--n-shards", type=int, default=1)
     parser.add_argument("--limit", type=int, default=None, help="evaluate only the first N eval proteins (smoke test)")
     parser.add_argument("--fit-limit", type=int, default=None, help="fit on only the first N fit proteins (smoke test)")
     parser.add_argument("--runner-tag", default="local")
@@ -259,11 +268,15 @@ def main() -> int:
         raise ValueError("--seeds 1 would differ from the production single-seed salt; use >= 2")
 
     entry = resolve_model_entry(args.model)
-    proteins = harness.load_eval_proteins()[: args.limit]
-    fit_proteins = harness.load_legacy_proteins(FIT_SET)[: args.fit_limit]
-    shared = {p.stem for p in proteins} & {p.stem for p in fit_proteins}
+    proteins = [p for name in args.protein_sets
+                for p in harness.load_protein_set(name, max_length=args.max_length)]
+    proteins = proteins[args.shard :: args.n_shards][: args.limit]
+    eval_chains = {harness.base_stem(p.stem) for p in harness.load_eval_proteins()}
+    fit_proteins = [p for p in harness.load_legacy_proteins(FIT_SET) if harness.base_stem(p.stem) not in eval_chains]
+    fit_proteins = fit_proteins[: args.fit_limit]
+    shared = {harness.base_stem(p.stem) for p in proteins} & {harness.base_stem(p.stem) for p in fit_proteins}
     if shared:
-        raise ValueError(f"fit and eval proteins share stems: {sorted(shared)[:5]}")
+        raise ValueError(f"fit and evaluated proteins share chains: {sorted(shared)[:5]}")
     load_start = time.perf_counter()
     backend = harness.load_model(args.model, device=args.device, dtype=args.dtype, tail_batch_size=args.tail_batch_size)
     model_load_seconds = time.perf_counter() - load_start
@@ -279,7 +292,8 @@ def main() -> int:
         props = torch.cuda.get_device_properties(0)
         static |= {"gpu_name": props.name, "gpu_total_memory_gb": round(props.total_memory / 2**30, 1),
                    "gpu_compute_capability": f"{props.major}.{props.minor}"}
-    print(f"model {entry.nickname}, {n_boundaries} layers, {len(fit_proteins)} fit and {len(proteins)} eval proteins, "
+    print(f"model {entry.nickname}, {n_boundaries} layers, {len(fit_proteins)} fit and {len(proteins)} evaluated "
+          f"proteins ({' + '.join(args.protein_sets)}, shard {args.shard}/{args.n_shards}), "
           f"{args.seeds} seeds", flush=True)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

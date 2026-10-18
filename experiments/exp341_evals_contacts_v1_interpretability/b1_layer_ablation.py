@@ -10,8 +10,12 @@ conditions plus the clean model (48 + 1 for the 24-layer 1.5B models).
 
 The mean of each sublayer is taken over every position the clean readout
 processes (prefix passes and tail chunks) across all proteins and seeds of
-this run, accumulated during the clean pass. It is saved, so a later run can
-be pointed at the same means.
+this run, accumulated during the clean pass. It is saved, and ``--means``
+points a later run at saved means, so a run on another protein set ablates
+with the same vectors (B1's extensions use the eval-set means, committed as
+``data/b1_sublayer_means.npz``). With ``--means`` the conditions are
+independent, so ``--shard``/``--n-shards`` split them (clean included)
+across instances.
 
 The script records raw data and applies no threshold. Per condition,
 protein and seed it keeps the full P(contact) matrix and R-precision in four
@@ -35,6 +39,8 @@ Outputs under ``--output-dir`` (one condition at a time, so a rerun resumes):
 Conditions are ``clean`` and ``L<layer>_<site>``, e.g. ``L07_mlp``.
 
     uv run python b1_layer_ablation.py --device cuda --output-dir out/b1
+    uv run python b1_layer_ablation.py --device cuda --protein-set legacy-extra --means data/b1_sublayer_means.npz \
+        --layers 14 15 16 17 18 19 20 21 22 23 --output-dir out/b1_extra
     uv run python b1_layer_ablation.py --device cpu --limit 2 --seeds 2 --layers 0 --output-dir out/b1_smoke
 """
 
@@ -108,14 +114,22 @@ def main() -> int:
     parser.add_argument("--tail-batch-size", type=int, default=256)
     parser.add_argument("--layers", type=int, nargs="*", default=None, help="ablate only these layers (default all)")
     parser.add_argument("--limit", type=int, default=None, help="score only the first N proteins (smoke test)")
+    parser.add_argument("--protein-set", choices=harness.PROTEIN_SETS, default="eval")
+    parser.add_argument("--max-length", type=int, default=None, help="drop proteins longer than this")
+    parser.add_argument("--sample", type=int, default=None, help="seeded random subset of this many proteins")
+    parser.add_argument("--means", type=Path, default=None, help="saved sublayer_means.npz to ablate with")
+    parser.add_argument("--shard", type=int, default=0, help="with --means: run conditions shard::n-shards")
+    parser.add_argument("--n-shards", type=int, default=1)
     parser.add_argument("--runner-tag", default="local")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.seeds < 2 and args.seed_offset == 0:
         raise ValueError("--seeds 1 at offset 0 would differ from the production single-seed salt; use >= 2")
+    if args.n_shards > 1 and args.means is None:
+        raise ValueError("--n-shards needs --means: without it the clean pass computes the means every shard uses")
 
     entry = resolve_model_entry(args.model)
-    proteins = harness.load_eval_proteins()[: args.limit]
+    proteins = harness.load_protein_set(args.protein_set, max_length=args.max_length, sample=args.sample)[: args.limit]
     load_start = time.perf_counter()
     backend = harness.load_model(args.model, device=args.device, dtype=args.dtype, tail_batch_size=args.tail_batch_size)
     model_load_seconds = time.perf_counter() - load_start
@@ -131,7 +145,7 @@ def main() -> int:
         props = torch.cuda.get_device_properties(0)
         static |= {"gpu_name": props.name, "gpu_total_memory_gb": round(props.total_memory / 2**30, 1),
                    "gpu_compute_capability": f"{props.major}.{props.minor}"}
-    print(f"model {entry.nickname}, {n_layers} layers, {len(proteins)} proteins, seeds "
+    print(f"model {entry.nickname}, {n_layers} layers, {len(proteins)} {args.protein_set} proteins, seeds "
           f"{args.seed_offset}..{args.seed_offset + args.seeds - 1}", flush=True)
 
     # The per-seed readout must be the production readout: at offset 0 its
@@ -152,11 +166,18 @@ def main() -> int:
     def done(name: str) -> bool:
         return (args.output_dir / "pcontact" / f"{name}.npz").exists()
 
-    if done("clean") and means_path.exists():
-        saved = np.load(means_path)
+    conditions = ["clean", *(condition_name(layer, site) for layer in layers for site in SITES)]
+    conditions = conditions[args.shard :: args.n_shards]
+    if args.means is not None or (done("clean") and means_path.exists()):
+        saved = np.load(args.means if args.means is not None else means_path)
         means = {(k, site): torch.from_numpy(saved["means"][k, s])
                  for k in range(n_layers) for s, site in enumerate(SITES)}
-        print("clean done; loaded sublayer means", flush=True)
+        print(f"loaded sublayer means; conditions {conditions}", flush=True)
+        if "clean" in conditions and not done("clean"):
+            start = time.perf_counter()
+            clean = run_condition("clean", proteins, backend, args, static)
+            print(f"clean {time.perf_counter() - start:.0f}s rp_all {clean[clean.seed == 'mean'].rp_all.mean():.4f}",
+                  flush=True)
     else:
         start = time.perf_counter()
         with harness.sublayer_means(backend.model) as (means, counts):
@@ -169,7 +190,7 @@ def main() -> int:
     for layer in layers:
         for site in SITES:
             name = condition_name(layer, site)
-            if done(name):
+            if name not in conditions or done(name):
                 continue
             start = time.perf_counter()
             with harness.mean_ablation(backend.model, {(layer, site): means[(layer, site)]}):
