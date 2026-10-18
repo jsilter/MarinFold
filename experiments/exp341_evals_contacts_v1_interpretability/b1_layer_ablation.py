@@ -111,7 +111,7 @@ def main() -> int:
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--seeds", type=int, default=harness.DEFAULT_SEEDS)
     parser.add_argument("--seed-offset", type=int, default=0, help="first document seed; nonzero for repeat runs")
-    parser.add_argument("--tail-batch-size", type=int, default=256)
+    parser.add_argument("--tail-batch-size", type=int, default=64, help="tails per cached forward; 64 fits an L4 at L <= 1000")
     parser.add_argument("--layers", type=int, nargs="*", default=None, help="ablate only these layers (default all)")
     parser.add_argument("--limit", type=int, default=None, help="score only the first N proteins (smoke test)")
     parser.add_argument("--protein-set", choices=harness.PROTEIN_SETS, default="eval")
