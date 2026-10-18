@@ -52,7 +52,7 @@ def main() -> int:
                 .sort_values("stem").reset_index(drop=True))
     stems = proteins.stem.to_numpy()
     masks = splits(proteins)
-    indexed = mean.set_index(["lens", "boundary", "stem"])
+    indexed = mean.set_index(["lens", "boundary", "stem"]).sort_index()
 
     rng = np.random.default_rng(SEED)
     rows = []
