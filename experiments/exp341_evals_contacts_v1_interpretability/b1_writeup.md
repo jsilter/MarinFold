@@ -1,55 +1,76 @@
-# exp341 B1: layer ablation of the contact readout
+# exp341 B1: where exp277 computes contacts
 
 B1 of [\#341](https://github.com/Open-Athena/MarinFold/issues/341) asks
 where in exp277's 24 layers the contact prediction is computed, to inform
 decision B in [`research_plan.md`](research_plan.md) (section 1.2): whether
-the next size sweep should favour depth or width. This report covers the
-layer ablation. The tuned lens, the other half of B1, has not been run.
+the next size sweep should favour depth or width. Two measurements ran:
+mean-ablating each layer's attention and MLP output, and decoding the
+contact readout from every layer boundary with a logit lens and a tuned
+lens. The pairwise probe in the sequence section (plan section 6.1) did not
+run.
 
 **Recommendation: do not make the next model shallower or move parameters
-from depth into width. If a size sweep runs, run its deeper arm first.**
-The ablation does not show that a deeper model would predict contacts
-better; only that sweep can show that.
+from depth into width. If a size sweep runs, run its deeper arm first,
+and judge it on long proteins.** Both halves of the plan's "favour depth"
+row hold, but the lens half holds narrowly: the last six layers add 0.042
+R-precision under the logit lens, and the last five add 0.017, a gain that
+grows with protein length. Neither
+measurement shows that a deeper model would predict contacts better; only
+the sweep can show that.
 
-Decision B's two depth rows, with the plan's layer numbers (1 to 24; this
-report's layers are 0 to 23, so the plan's layers 19 to 24 are 18 to 23
-here):
+Decision B's depth rows. The plan numbers layers 1 to 24, so its "by layer
+18" is boundary 18 here (the residual after 18 layers) and its "layers 19
+to 24" are the change from boundary 18 to boundary 24 (the model):
 
 | Plan's condition | "Favour depth" row | "Favour width or shallower" row | Observed |
 |---|---|---|---|
 | Mean-ablating one late layer (19 to 24) costs | >= 0.02 R-precision | < 0.01 | Every late MLP costs 0.054 to 0.458; late attention 0.001 to 0.281 |
-| Tuned-lens readout over layers 19 to 24 | still rising by >= 0.03 | within 0.01 of final by layer 18 | Not run |
+| Lens readout from boundary 18 to 24 | still rising by >= 0.03 | within 0.01 of final by boundary 18 | Rises 0.042 (logit lens, CI 0.037 to 0.047) or 0.064 (tuned lens, 0.053 to 0.076) |
 
-The ablation half of the "width or shallower" row fails by a wide margin:
-no late MLP costs less than 0.05. The ablation half of the "depth" row
-holds. The plan proposed these thresholds before the run and treats them as
-provisional; the conclusion does not depend on them, since the late MLP
-costs are 5 to 46 times the 0.01 boundary.
+The plan proposed these thresholds before the run and treats them as
+provisional. The ablation half does not depend on them (late MLP costs are
+5 to 46 times the 0.01 boundary). The lens half does: a threshold of 0.05
+instead of 0.03 would flip the logit-lens reading.
 
-Three reasons the result points at the deeper arm without proving a deeper
-model is better:
+What the two measurements show together:
 
+- **Contacts form in the second half of the network.** Neither lens decodes
+  any contact signal through boundary 11 (all-pairs R-precision 0.004 to
+  0.028, against 0.523 for the model). The logit lens then rises from 0.059
+  at boundary 12 to 0.390 at 15 and 0.506 at 19. Layers 0 to 2 are still
+  essential (ablating them costs 0.41 to 0.51), so the first half builds
+  something the contact readout needs, but not in a form the unembedding
+  can read at the query.
+- **The last five layers add little on average and more on long
+  proteins.** The logit lens at boundary 19 is 0.017 below the model (CI
+  0.012 to 0.021), then dips to 0.412 at boundary 21 and recovers by 24.
+  Layers 19 to 22 are among the costliest to ablate, so they change the
+  representation heavily for a small net change in contact ranking. On
+  long-range contacts the boundary-19 gap grows with length: -0.003,
+  -0.014 and -0.025 by length tercile (logit lens), -0.013, -0.044 and
+  -0.093 (tuned lens). Long proteins are where contacts-v1 scales worst
+  (\#262, L^0.79), and B2 found the contact budget is not the cause (229 of
+  69.5M training documents truncated).
 - **A costly late layer shows the model uses its depth, not that it lacks
-  depth.** A model with exactly enough layers and a model that needs more
-  would both show costly late layers. Ablating layer 0 or layer 1 costs as
-  much as ablating layer 21, and that does not argue for more early layers.
-  The ablation could have ruled depth out (cheap late layers) and did not.
-- **Some layers are lightly used.** Layers 11 to 13 each cost under 0.02 for
-  both sublayers, and the attention in layers 21 and 22 costs 0.010 and
-  0.001. A single-layer ablation misses work that two layers share, so
-  these are upper bounds on spare capacity, not measurements of it.
-- **The late MLPs matter more on long proteins.** For long-range contacts,
-  ablating the layer 22 MLP costs 0.25 on 30-173-residue proteins and 0.43
-  on 297-761-residue proteins. Long proteins are where contacts-v1 scales
-  worst (\#262, L^0.79), and B2 found the contact budget is not the cause
-  (229 of 69.5M training documents truncated). Late computation is a
-  candidate, and a deeper model is one way to add it.
+  depth.** A model with exactly enough layers and one that needs more would
+  both show costly late layers; ablating layer 0 or 1 costs as much as
+  layer 21, and that does not argue for more early layers. Layers 11 to 13
+  each cost under 0.02 to ablate, and attention in layers 21 and 22 costs
+  0.010 and 0.001, so some capacity is lightly used.
+- **The tuned lens did not beat the logit lens.** The plan asks for this
+  comparison to confirm the tuned lens adds information. Here it decodes
+  less than the logit lens at boundaries 13 and 14 (0.098 and 0.155 against
+  0.205 and 0.324) and at 19 to 23, despite explaining 90 to 95% of the
+  held-out final residual's variance at boundaries 18 to 23. Its residual
+  errors fall in the directions that rank contacts. The logit lens is the
+  better reading of this model; the tuned lens's larger late rise (0.064)
+  partly reflects its own error.
 
-Two cheaper results would firm this up before training anything: the tuned
-lens (under 1 GPU-hour in the plan's estimate), which fills the other half
-of the decision-B rule, and the same ablation on an earlier exp277
-checkpoint, which separates late layers still being trained from late
-layers that have converged.
+One cheap result would change the confidence of this recommendation before
+any training: the same ablation and lens on an earlier exp277 checkpoint
+(plan section 7.1). If the late layers' gain is still growing at the end of
+training, the small average gain past boundary 19 reflects under-training,
+not a ceiling.
 
 ## What ran
 
@@ -58,9 +79,10 @@ layers that have converged.
 | Model | `contacts-v1-exp277-m2-p06-full-epoch-1.5B` (step 266344), bf16 |
 | Proteins | 116: eval-val (97) and eval-denovo (19) |
 | Readout | production pairwise P(contact), 4 document seeds per protein |
-| Conditions | clean, plus 24 layers x {attention, MLP} each mean-ablated alone |
-| Compute | one NVIDIA L4 (g6.xlarge, us-east-2), 4.25 GPU-hours, about 320 s per condition |
-| Run | `s3://marinfold-exp91-usw2/exp341/b1/20261017T142617Z-9a5b6aa0/`, commit 9a5b6aa0 |
+| Ablation | clean, plus 24 layers x {attention, MLP} each mean-ablated alone |
+| Lens | logit and tuned lens at all 25 layer boundaries; tuned maps fitted on 200 legacy-554 proteins |
+| Compute | one NVIDIA L4 (g6.xlarge, us-east-2): ablation 4.25 GPU-hours (about 320 s per condition); lens 5.5 min fit pass plus 6 min eval pass |
+| Runs | ablation `s3://marinfold-exp91-usw2/exp341/b1/20261017T142617Z-9a5b6aa0/` (commit 9a5b6aa0); lens `s3://marinfold-exp91-usw2/exp341/lens/20261017T233643Z-6d7d0cee/` (commit 6d7d0cee) |
 
 Mean ablation replaces the sublayer's output, before it is added to the
 residual stream, with one fixed vector at every position. Each vector is
@@ -75,7 +97,7 @@ and long (>= 24). The clean model scores 0.522 on all pairs (0.566 short,
 0.537 medium, 0.498 long). An ablation that removes all contact signal
 lands near -0.52.
 
-## Results
+## Layer ablation
 
 ![B1 layer ablation](plots/b1_layer_ablation.png)
 
@@ -150,6 +172,73 @@ trend (layer 6 MLP: -0.129, -0.173, -0.231).
 0.504) in absolute terms under every costly ablation (layer 21 MLP: -0.521
 against -0.446), roughly in proportion to its higher starting score.
 
+## Lens
+
+![B1 lens](plots/b1_lens.png)
+
+The readout uses two next-token distributions over the protein's position
+tokens: one at the `<contact>` query and one at each `<contact> <p_i>`
+query. The lens takes the residual at those query positions at boundary k
+(0 = embeddings, k = after layer k - 1) and decodes it:
+
+- **Logit lens**: the model's final norm and unembedding applied directly.
+- **Tuned lens**: one affine map per boundary first, fitted by ridge
+  regression from the RMS-normalized boundary-k residual to the
+  RMS-normalized final residual. The maps were fitted on 140,832 query
+  residuals from the 200 legacy-554 proteins in `data/a2_legacy_gt.jsonl.gz`
+  (4 seeds; no stem shared with the eval sets), with each boundary's ridge
+  strength chosen on 20% of those proteins held out.
+
+Both decodes run in float32. At boundary 24 both are the model; their
+seed-averaged R-precision matches the production readout within 0.018 on
+every protein (mean 0.5229 against 0.5223), the residual difference coming
+from the production readout's bf16 logits.
+
+All-pairs R-precision decoded at each boundary from 12 on (boundaries 0 to
+11 are 0.004 to 0.028 under both lenses), with the gap to the model and its
+paired bootstrap CI:
+
+| Boundary | Logit lens | Gap (CI) | Tuned lens | Gap (CI) |
+|---|---|---|---|---|
+| 12 | 0.059 | -0.464 (-0.495, -0.432) | 0.058 | -0.465 (-0.497, -0.432) |
+| 13 | 0.205 | -0.318 (-0.339, -0.296) | 0.098 | -0.424 (-0.454, -0.394) |
+| 14 | 0.324 | -0.199 (-0.212, -0.185) | 0.155 | -0.368 (-0.395, -0.341) |
+| 15 | 0.390 | -0.133 (-0.142, -0.123) | 0.351 | -0.172 (-0.187, -0.157) |
+| 16 | 0.405 | -0.117 (-0.128, -0.107) | 0.415 | -0.108 (-0.119, -0.097) |
+| 17 | 0.445 | -0.077 (-0.085, -0.070) | 0.440 | -0.083 (-0.094, -0.072) |
+| 18 | 0.481 | -0.042 (-0.047, -0.037) | 0.459 | -0.064 (-0.076, -0.053) |
+| 19 | 0.506 | -0.017 (-0.021, -0.012) | 0.469 | -0.053 (-0.063, -0.044) |
+| 20 | 0.470 | -0.053 (-0.060, -0.046) | 0.456 | -0.067 (-0.077, -0.057) |
+| 21 | 0.412 | -0.111 (-0.126, -0.097) | 0.450 | -0.073 (-0.085, -0.062) |
+| 22 | 0.454 | -0.069 (-0.081, -0.057) | 0.472 | -0.051 (-0.060, -0.043) |
+| 23 | 0.508 | -0.015 (-0.020, -0.011) | 0.489 | -0.034 (-0.043, -0.026) |
+| 24 | 0.523 | 0 | 0.523 | 0 |
+
+**Length.** Long-range gap to the model by length tercile:
+
+| Lens, boundary | 30-173 residues | 177-290 | 297-761 |
+|---|---|---|---|
+| Logit, 18 | -0.038 | -0.044 | -0.039 |
+| Logit, 19 | +0.003 | -0.014 | -0.025 |
+| Logit, 21 | -0.081 | -0.130 | -0.110 |
+| Tuned, 18 | -0.013 | -0.048 | -0.113 |
+| Tuned, 19 | -0.013 | -0.044 | -0.093 |
+
+Under the logit lens, short proteins' long-range contacts are fully
+decodable by boundary 19, and the longest tercile's are 0.025 short of the
+model. The tuned lens shows the same order with larger gaps.
+
+**Eval set.** eval-denovo is ahead of eval-val at every boundary (logit
+lens at boundary 19: 0.603 against 0.487; model 0.615 against 0.505), with
+similar gaps to the model.
+
+**Tuned-lens fit.** Held-out R² of the tuned map is 0.16 to 0.40 over
+boundaries 0 to 11, 0.57 at 12, and 0.90 to 0.95 at 18 to 23. The
+logit lens's R² against the same target is negative at every boundary (-1.43
+at 0, -0.18 at 23): the raw intermediate residual is far from the final one
+in Euclidean terms even where it already ranks contacts well. Chosen ridge
+strengths range from 1e-4 to 1 times the mean feature variance.
+
 ## Limits
 
 - **The mean mixes two kinds of position.** Each replacement vector
@@ -166,7 +255,15 @@ against -0.446), roughly in proportion to its higher starting score.
 - **Single-layer ablation misses shared work.** If two layers compute the
   same thing, removing either costs little. The cheap layers (11 to 13,
   late attention) are candidates for spare capacity, not proof of it.
-- **The tuned lens is not run**, so the decision-B rule is half evaluated.
+- **The lens reads only the query positions.** Contact information held
+  elsewhere (at the residues' sequence-section tokens) is invisible to it;
+  that is what the pairwise probe in plan section 6.1 would measure, and it
+  did not run. "No decodable signal through boundary 11" means none at the
+  query, not none in the network.
+- **The tuned lens is a least-squares fit on 200 proteins.** It explains
+  most of the final residual's variance but decodes contacts worse than the
+  logit lens. A lens trained on a KL objective over position tokens, as in
+  the original tuned-lens work, might do better; this one was not tried.
 
 ## Files
 
@@ -174,13 +271,24 @@ against -0.446), roughly in proportion to its higher starting score.
   per-seed P(contact) and banded R-precision; resumable).
 - [`analyze_b1.py`](analyze_b1.py): paired deltas and both bootstrap CIs by
   band, eval set and length tercile.
-- [`plot_b1.py`](plot_b1.py): the figure above.
+- [`plot_b1.py`](plot_b1.py): the ablation figure.
+- [`b1_tuned_lens.py`](b1_tuned_lens.py): the lens driver (fit, then decode
+  every boundary; raw per-seed P(contact); resumable).
+- [`analyze_b1_lens.py`](analyze_b1_lens.py), [`plot_b1_lens.py`](plot_b1_lens.py):
+  lens curves with paired gaps by band, eval set and length tercile; the lens figure.
+- [`data/b1_lens_curve.csv`](data/b1_lens_curve.csv),
+  [`data/b1_lens_scores.csv`](data/b1_lens_scores.csv),
+  [`data/b1_lens_fit.csv`](data/b1_lens_fit.csv),
+  [`data/b1_lens_timings.csv`](data/b1_lens_timings.csv): curve, per-protein
+  scores, tuned-map fit table, timings (with the boundary-24 check).
+- [`plots/b1_lens.png`](plots/b1_lens.png).
 - [`data/b1_deltas.csv`](data/b1_deltas.csv): every condition x band x split
   with both CIs.
 - [`data/b1_scores.csv`](data/b1_scores.csv): R-precision per condition,
   protein and seed (and the seed-averaged matrix).
 - [`data/b1_timings.csv`](data/b1_timings.csv): per-protein timings.
 - [`plots/b1_layer_ablation.png`](plots/b1_layer_ablation.png).
-- The per-seed P(contact) upper triangles for all 49 conditions (about
-  3.4 GB) are under `out/b1/pcontact/` in the S3 run prefix above, not in
-  git.
+- Not in git, under the S3 run prefixes above: the ablation's per-seed
+  P(contact) for all 49 conditions (about 3.4 GB, `out/b1/pcontact/`), and
+  the lens's per-seed P(contact) for both lenses at every boundary plus the
+  fitted maps (`out/lens/pcontact/`, `out/lens/lens.npz`).
