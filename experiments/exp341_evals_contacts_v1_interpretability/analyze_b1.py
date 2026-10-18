@@ -4,16 +4,20 @@
 """B1 layer ablation: R-precision lost when one attention or MLP output is mean-ablated.
 
 Reads ``b1_layer_ablation.py``'s ``scores/*.csv`` and ``timings/*.csv``
-(``--input-dir``), concatenates them into ``data/b1_scores.csv`` and
-``data/b1_timings.csv``, and writes ``data/b1_deltas.csv``.
+from one or more ``--input-dir`` (runs on different protein sets, or shards
+of one), concatenates them into ``data/<prefix>_scores.csv`` and
+``data/<prefix>_timings.csv``, and writes ``data/<prefix>_deltas.csv``.
 
 Per condition, separation band (all, short, medium, long) and split (all
-proteins, each eval set, each length tercile) the quantity is
+proteins, each eval set, and each length tercile or, with
+``--length-bins``, each fixed length bin) the quantity is
 
     delta = R-precision(ablated) - R-precision(clean)
 
 on the seed-averaged P(contact) matrix, the production readout, averaged
-over proteins. Ablated and clean see the same proteins and document seeds,
+over the proteins scored under both the condition and clean (runs on
+different sets may cover different conditions) and with true contacts in
+the band. Ablated and clean see the same proteins and document seeds,
 so the comparison is paired.
 
 Two CIs (``N_BOOT``, seeded):
@@ -29,6 +33,8 @@ Two CIs (``N_BOOT``, seeded):
 No threshold is applied; the deltas are the raw effect sizes.
 
     uv run python analyze_b1.py --input-dir out/b1
+    uv run python analyze_b1.py --input-dir out/b1 out/b1_extra out/b1_panel_* --prefix b1_ext \
+        --length-bins 0 150 300 500 1000
 """
 
 import argparse
@@ -44,18 +50,27 @@ N_BOOT = 10_000
 SEED = 341
 
 
-def load(input_dir: Path, sub: str) -> pd.DataFrame:
-    frames = [pd.read_csv(path, dtype={"seed": str}) for path in sorted((input_dir / sub).glob("*.csv"))]
+def load(input_dirs: list[Path], sub: str) -> pd.DataFrame:
+    frames = [pd.read_csv(path, dtype={"seed": str})
+              for input_dir in input_dirs for path in sorted((input_dir / sub).glob("*.csv"))]
     return pd.concat(frames, ignore_index=True)
 
 
-def splits(proteins: pd.DataFrame) -> dict[str, np.ndarray]:
-    """Boolean masks over ``proteins`` (one row per stem) for each split."""
-    terciles = pd.qcut(proteins.n_residues, 3, labels=False)
-    edges = proteins.groupby(terciles).n_residues.agg(["min", "max"])
+def splits(proteins: pd.DataFrame, length_bins: list[int] | None = None) -> dict[str, np.ndarray]:
+    """Boolean masks over ``proteins`` (one row per stem) for each split.
+
+    Length splits are terciles of ``proteins`` or, given ``length_bins``
+    edges, the bins ``(edge_k, edge_k+1]``.
+    """
     out = {"all": np.ones(len(proteins), dtype=bool)}
     for eval_set in sorted(proteins.eval_set.unique()):
         out[eval_set] = (proteins.eval_set == eval_set).to_numpy()
+    if length_bins is not None:
+        for low, high in zip(length_bins[:-1], length_bins[1:], strict=False):
+            out[f"length_{low + 1}-{high}"] = ((proteins.n_residues > low) & (proteins.n_residues <= high)).to_numpy()
+        return out
+    terciles = pd.qcut(proteins.n_residues, 3, labels=False)
+    edges = proteins.groupby(terciles).n_residues.agg(["min", "max"])
     for k, (low, high) in edges.iterrows():
         out[f"length_T{k + 1}_{low}-{high}"] = (terciles == k).to_numpy()
     return out
@@ -79,21 +94,23 @@ def bootstrap_seeds(per_seed: np.ndarray, rng: np.random.Generator) -> tuple[flo
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--input-dir", type=Path, required=True)
+    parser.add_argument("--input-dir", type=Path, nargs="+", required=True)
+    parser.add_argument("--prefix", default="b1", help="output names data/<prefix>_{scores,timings,deltas}.csv")
+    parser.add_argument("--length-bins", type=int, nargs="+", default=None,
+                        help="fixed length-bin edges instead of terciles")
     args = parser.parse_args()
 
     scores = load(args.input_dir, "scores")
-    scores.to_csv(DATA / "b1_scores.csv", index=False)
-    load(args.input_dir, "timings").to_csv(DATA / "b1_timings.csv", index=False)
+    if scores.duplicated(["condition", "stem", "seed"]).any():
+        raise ValueError("a condition, protein and seed appear in more than one input")
+    scores.to_csv(DATA / f"{args.prefix}_scores.csv", index=False)
+    load(args.input_dir, "timings").to_csv(DATA / f"{args.prefix}_timings.csv", index=False)
 
     mean = scores[scores.seed == "mean"]
     per_seed = scores[scores.seed != "mean"]
-    proteins = mean[mean.condition == "clean"][["stem", "eval_set", "n_residues"]].sort_values("stem").reset_index(drop=True)
-    stems = proteins.stem.to_numpy()
     seeds = sorted(per_seed.seed.unique(), key=int)
-    masks = splits(proteins)
 
-    def matrix(frame: pd.DataFrame, condition: str, band: str) -> np.ndarray:
+    def matrix(frame: pd.DataFrame, condition: str, band: str, stems: np.ndarray) -> np.ndarray:
         rows = frame[frame.condition == condition]
         if frame is mean:
             return rows.set_index("stem").loc[stems, f"rp_{band}"].to_numpy()
@@ -103,11 +120,20 @@ def main() -> int:
     rows = []
     for condition in sorted(c for c in mean.condition.unique() if c != "clean"):
         layer, site = int(condition[1:3]), condition.split("_")[1]
+        scored = set(mean.stem[mean.condition == condition]) & set(mean.stem[mean.condition == "clean"])
+        proteins = (mean[(mean.condition == "clean") & mean.stem.isin(scored)][["stem", "eval_set", "n_residues"]]
+                    .sort_values("stem").reset_index(drop=True))
+        stems = proteins.stem.to_numpy()
+        masks = splits(proteins, args.length_bins)
         for band in BANDS:
-            delta = matrix(mean, condition, band) - matrix(mean, "clean", band)
-            delta_seed = matrix(per_seed, condition, band) - matrix(per_seed, "clean", band)
-            clean = matrix(mean, "clean", band)
-            for split, mask in masks.items():
+            delta = matrix(mean, condition, band, stems) - matrix(mean, "clean", band, stems)
+            delta_seed = matrix(per_seed, condition, band, stems) - matrix(per_seed, "clean", band, stems)
+            clean = matrix(mean, "clean", band, stems)
+            finite = np.isfinite(delta) & np.isfinite(delta_seed).all(axis=1)
+            for split, split_mask in masks.items():
+                mask = split_mask & finite
+                if not mask.any():
+                    continue
                 lo, hi = bootstrap(delta[mask], rng)
                 lo_seed, hi_seed = bootstrap_seeds(delta_seed[mask], rng)
                 rows.append({
@@ -116,7 +142,7 @@ def main() -> int:
                     "lo": lo, "hi": hi, "delta_seed": delta_seed[mask].mean(), "lo_seed": lo_seed, "hi_seed": hi_seed,
                 })
     out = pd.DataFrame(rows)
-    out.to_csv(DATA / "b1_deltas.csv", index=False, float_format="%.5g")
+    out.to_csv(DATA / f"{args.prefix}_deltas.csv", index=False, float_format="%.5g")
 
     table = out[(out.split == "all")].pivot_table(index=["layer"], columns=["site", "band"], values="delta")
     with pd.option_context("display.width", 200, "display.float_format", "{:+.3f}".format):
