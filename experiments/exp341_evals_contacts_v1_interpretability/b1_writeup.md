@@ -37,8 +37,9 @@ What the two measurements show together:
 - **Contacts form in the second half of the network.** Neither lens decodes
   any contact signal through boundary 11 (all-pairs R-precision 0.004 to
   0.028, against 0.523 for the model). The logit lens then rises from 0.059
-  at boundary 12 to 0.390 at 15 and 0.506 at 19. Layers 0 to 2 are still
-  essential (ablating them costs 0.41 to 0.51), so the first half builds
+  at boundary 12 to 0.390 at 15 and 0.506 at 19. Layers 0 and 1 and the
+  attention in layer 2 are still essential (ablating them costs 0.41 to
+  0.51), so the first half builds
   something the contact readout needs, but not in a form the unembedding
   can read at the query.
 - **The last five layers add little on average and more on long
